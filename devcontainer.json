@@ -1,0 +1,10 @@
+{
+  "name": "file-scan-sandbox",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "postCreateCommand": "sudo apt update && sudo apt install -y clamav clamav-daemon unzip p7zip-full && sudo freshclam",
+  "customizations": {
+    "vscode": {
+      "extensions": []
+    }
+  }
+}
