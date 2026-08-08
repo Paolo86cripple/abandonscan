@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
 #
-# scan-game.sh - scarica (o usa un file già locale) e scansiona con
-# ClamAV + verifica su VirusTotal. Supporta:
+# scan-game.sh - scarica (o usa un file già locale), estrae ricorsivamente
+# archivi e immagini ottiche, scansiona tutto con ClamAV e verifica su
+# VirusTotal.
+#
+# Sorgenti supportate:
 #   - URL diretti (http/https)      -> scaricati con curl
-#   - Link Mega.nz (mega.nz/...)    -> scaricati con megadl (megatools)
-#   - Percorsi a file già locali     -> usati direttamente, nessun download
+#   - Link Mega.nz                  -> scaricati con megadl (megatools)
+#   - Percorsi a file già locali     -> usati direttamente
 #
-# Richiede la variabile d'ambiente VT_API_KEY per il controllo VirusTotal.
+# Formati estratti ricorsivamente:
+#   - Archivi:        .zip .rar .7z
+#   - Immagini ottiche: .iso .img .nrg (via 7z, che legge ISO9660/UDF)
+#   - .bin/.cue        (convertiti in ISO con bchunk, poi estratti)
+#   - .mdf/.mds        rilevati ma non estratti automaticamente (formato
+#                      proprietario Alcohol 120%, tool poco standard su
+#                      Linux) - vengono comunque scansionati come file
 #
-# Uso: ./scan-game.sh <url_o_percorso_locale> [password_mega]
-#
-# Il secondo argomento (opzionale) è la password aggiuntiva di un link
-# Mega protetto - va usato SOLO se il link mega richiede una password
-# extra oltre alla chiave già incorporata nell'URL.
+# Uso: ./scan-game.sh <url|link_mega|percorso_file_locale> [password_mega]
 
 set -euo pipefail
+
+MAX_DEPTH=5
 
 if [ $# -lt 1 ]; then
     echo "Uso: $0 <url|link_mega|percorso_file_locale> [password_mega]" >&2
@@ -25,21 +32,103 @@ INPUT="$1"
 MEGA_PASSWORD="${2:-}"
 WORKDIR="$(mktemp -d)"
 
-echo "== 1/4: Individuazione sorgente e download (se necessario) =="
+# ---------------------------------------------------------------------
+# Estrazione ricorsiva: dato un file, se è un archivio o immagine ottica
+# nota, lo estrae in una cartella accanto a sé e richiama se stessa su
+# ogni file appena estratto, fino a MAX_DEPTH livelli.
+# ---------------------------------------------------------------------
+extract_recursive() {
+    local src="$1"
+    local depth="$2"
+
+    if [ "$depth" -gt "$MAX_DEPTH" ]; then
+        echo "  [profondità massima raggiunta, salto: $src]"
+        return
+    fi
+
+    local base_lower
+    base_lower="$(basename "$src" | tr '[:upper:]' '[:lower:]')"
+    local outdir="${src}.estratto"
+
+    case "$base_lower" in
+        *.zip)
+            command -v unzip &>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq unzip; }
+            mkdir -p "$outdir"
+            unzip -o -q "$src" -d "$outdir" 2>/dev/null && echo "  Estratto (zip): $src"
+            ;;
+        *.rar)
+            command -v unrar-free &>/dev/null || command -v unrar &>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq unrar-free; }
+            mkdir -p "$outdir"
+            if command -v unrar-free &>/dev/null; then
+                unrar-free x -y "$src" "$outdir/" 2>/dev/null && echo "  Estratto (rar): $src"
+            elif command -v unrar &>/dev/null; then
+                unrar x -y "$src" "$outdir/" 2>/dev/null && echo "  Estratto (rar): $src"
+            fi
+            ;;
+        *.7z)
+            command -v 7z &>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full; }
+            mkdir -p "$outdir"
+            7z x -y "$src" -o"$outdir" > /dev/null 2>&1 && echo "  Estratto (7z): $src"
+            ;;
+        *.iso|*.img|*.nrg)
+            command -v 7z &>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full; }
+            mkdir -p "$outdir"
+            if 7z x -y "$src" -o"$outdir" > /dev/null 2>&1; then
+                echo "  Estratto (immagine ottica ISO9660/UDF): $src"
+            else
+                echo "  ATTENZIONE: impossibile estrarre $src come immagine ottica standard (potrebbe usare un formato non ISO9660)"
+                rmdir "$outdir" 2>/dev/null || true
+                return
+            fi
+            ;;
+        *.bin)
+            local cue="${src%.bin}.cue"
+            local cue_alt="${src%.[bB][iI][nN]}.cue"
+            [ -f "$cue" ] || cue="$cue_alt"
+            if [ -f "$cue" ]; then
+                command -v bchunk &>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq bchunk; }
+                mkdir -p "$outdir"
+                bchunk -v "$src" "$cue" "$outdir/track" > /dev/null 2>&1
+                local first_iso
+                first_iso="$(ls "$outdir"/track01.iso 2>/dev/null | head -1)"
+                if [ -n "$first_iso" ]; then
+                    echo "  Convertito bin/cue in ISO: $src"
+                    extract_recursive "$first_iso" $((depth + 1))
+                else
+                    echo "  ATTENZIONE: conversione bin/cue fallita per $src"
+                fi
+            else
+                echo "  File .bin senza .cue corrispondente, non estraibile: $src"
+            fi
+            return
+            ;;
+        *.mdf|*.mds)
+            echo "  Rilevato formato MDF/MDS ($src): estrazione automatica non supportata, verrà comunque scansionato come file singolo."
+            return
+            ;;
+        *)
+            return
+            ;;
+    esac
+
+    # Ricorsione: processa ogni file appena estratto
+    if [ -d "$outdir" ]; then
+        find "$outdir" -type f | while read -r f; do
+            extract_recursive "$f" $((depth + 1))
+        done
+    fi
+}
+
+echo "== 1/5: Individuazione sorgente e download (se necessario) =="
 
 if [ -f "$INPUT" ]; then
-    # Caso 1: file già locale, nessun download
     echo "Rilevato file locale: $INPUT"
     FILENAME="$(basename "$INPUT")"
     cp "$INPUT" "$WORKDIR/$FILENAME"
 
 elif [[ "$INPUT" == *"mega.nz"* || "$INPUT" == *"mega.co.nz"* ]]; then
-    # Caso 2: link Mega.nz, serve megatools
     echo "Rilevato link Mega.nz"
-    if ! command -v megadl &>/dev/null; then
-        echo "megatools non installato, installo..."
-        sudo apt-get update -qq && sudo apt-get install -y -qq megatools
-    fi
+    command -v megadl &>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq megatools; }
     cd "$WORKDIR"
     if [ -n "$MEGA_PASSWORD" ]; then
         echo "Uso password fornita per il link Mega protetto"
@@ -59,7 +148,6 @@ elif [[ "$INPUT" == *"mega.nz"* || "$INPUT" == *"mega.co.nz"* ]]; then
     cd - > /dev/null
 
 elif [[ "$INPUT" == http://* || "$INPUT" == https://* ]]; then
-    # Caso 3: URL diretto normale
     echo "Rilevato URL diretto"
     cd "$WORKDIR"
     FILENAME="$(basename "$INPUT" | sed 's/%20/ /g; s/%28/(/g; s/%29/)/g')"
@@ -74,22 +162,31 @@ fi
 echo "File pronto: $WORKDIR/$FILENAME ($(du -h "$WORKDIR/$FILENAME" | cut -f1))"
 
 echo ""
-echo "== 2/4: Scansione ClamAV locale =="
-if ! command -v clamscan &>/dev/null; then
-    echo "ClamAV non installato, installo..."
-    sudo apt-get update -qq && sudo apt-get install -y -qq clamav
-    sudo freshclam --quiet
+echo "== 2/5: Estrazione ricorsiva (archivi e immagini ottiche) =="
+extract_recursive "$WORKDIR/$FILENAME" 0
+
+FOUND_EXTRACTED="$(find "$WORKDIR" -type f ! -path "$WORKDIR/$FILENAME" 2>/dev/null | wc -l)"
+if [ "$FOUND_EXTRACTED" -gt 0 ]; then
+    echo ""
+    echo "File estratti (${FOUND_EXTRACTED} totali):"
+    find "$WORKDIR" -type f ! -path "$WORKDIR/$FILENAME" | sed 's/^/  /'
+else
+    echo "Nessuna estrazione effettuata (formato non compresso o non riconosciuto)."
 fi
-CLAMAV_RESULT="$(clamscan --no-summary "$WORKDIR/$FILENAME" 2>&1 || true)"
+
+echo ""
+echo "== 3/5: Scansione ClamAV ricorsiva (originale + tutto l'estratto) =="
+command -v clamscan &>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq clamav && sudo freshclam --quiet; }
+CLAMAV_RESULT="$(clamscan -r --no-summary "$WORKDIR" 2>&1 || true)"
 echo "$CLAMAV_RESULT"
 
 echo ""
-echo "== 3/4: Calcolo hash SHA256 =="
+echo "== 4/5: Calcolo hash SHA256 (file originale) =="
 SHA256="$(sha256sum "$WORKDIR/$FILENAME" | cut -d' ' -f1)"
 echo "SHA256: $SHA256"
 
 echo ""
-echo "== 4/4: Verifica su VirusTotal =="
+echo "== 5/5: Verifica su VirusTotal =="
 if [ -z "${VT_API_KEY:-}" ]; then
     echo "ATTENZIONE: VT_API_KEY non impostata, salto il controllo VirusTotal."
 else
@@ -119,7 +216,10 @@ fi
 
 echo ""
 echo "== RIEPILOGO =="
-echo "File: $WORKDIR/$FILENAME"
-echo "ClamAV: $([ -z "$CLAMAV_RESULT" ] && echo 'nessuna minaccia rilevata' || echo "$CLAMAV_RESULT")"
+echo "Archivio/file originale: $WORKDIR/$FILENAME"
+if [ "$FOUND_EXTRACTED" -gt 0 ]; then
+    echo "File estratti: $FOUND_EXTRACTED (vedi elenco sopra)"
+fi
+echo "ClamAV: $([ -z "$CLAMAV_RESULT" ] && echo 'nessuna minaccia rilevata su nulla, incluso il contenuto estratto' || echo "$CLAMAV_RESULT")"
 echo ""
-echo "Se tutto pulito, scarica il file dal Codespace con l'esploratore VS Code (tasto destro > Download)."
+echo "Se tutto pulito, scarica l'intera cartella $WORKDIR dal Codespace con l'esploratore VS Code (tasto destro > Download)."
