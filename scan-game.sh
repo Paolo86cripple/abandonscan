@@ -211,6 +211,38 @@ else
         echo "  Motori che segnalano MALEVOLO:  ${MALICIOUS:-0}"
         echo "  Motori che segnalano SOSPETTO:  ${SUSPICIOUS:-0}"
         echo "  Motori che segnalano PULITO:    ${HARMLESS:-0}"
+
+        if [ "${MALICIOUS:-0}" -gt 0 ] || [ "${SUSPICIOUS:-0}" -gt 0 ]; then
+            echo ""
+            echo "== 6/6: VirusTotal ha segnalato positivi, avvio analisi comportamentale Falcon Sandbox =="
+            if [ -z "${FALCON_API_KEY:-}" ]; then
+                echo "ATTENZIONE: FALCON_API_KEY non impostata, salto l'analisi Falcon Sandbox."
+                echo "Imposta il secret nel Codespace per abilitarla in questi casi."
+            else
+                FALCON_ENV_ID="${FALCON_ENV_ID:-100}"  # 100 = Windows 7 32-bit, adatto a Win9x/XP-era
+                FALCON_RESPONSE="$(curl -sS --request POST \
+                    --url "https://www.hybrid-analysis.com/api/v2/submit/file" \
+                    --header "api-key: ${FALCON_API_KEY}" \
+                    --header "user-agent: Falcon Sandbox" \
+                    --form "file=@${WORKDIR}/${FILENAME}" \
+                    --form "environment_id=${FALCON_ENV_ID}")"
+
+                FALCON_JOB_ID="$(echo "$FALCON_RESPONSE" | grep -o '"job_id":"[^"]*"' | head -1 | cut -d'"' -f4)"
+                FALCON_SHA256="$(echo "$FALCON_RESPONSE" | grep -o '"sha256":"[^"]*"' | head -1 | cut -d'"' -f4)"
+
+                if [ -n "$FALCON_JOB_ID" ]; then
+                    echo "Analisi comportamentale avviata (può richiedere fino a ~15 minuti)."
+                    echo "Job ID: $FALCON_JOB_ID"
+                    echo "Risultati (quando pronti) su:"
+                    echo "  https://www.hybrid-analysis.com/sample/${FALCON_SHA256}/${FALCON_JOB_ID}"
+                    echo "Oppure controlla da terminale con:"
+                    echo "  curl -sS --url https://www.hybrid-analysis.com/api/v2/report/${FALCON_JOB_ID}/summary --header \"api-key: \$FALCON_API_KEY\" --header \"user-agent: Falcon Sandbox\""
+                else
+                    echo "ATTENZIONE: invio a Falcon Sandbox non riuscito. Risposta ricevuta:"
+                    echo "$FALCON_RESPONSE"
+                fi
+            fi
+        fi
     fi
 fi
 
