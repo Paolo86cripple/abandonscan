@@ -70,6 +70,7 @@ DEFAULT_SETTINGS = {
     "sec_loopback": False,
     "sec_allow_network": False,
     "sec_disable_zdrive": True,
+    "sec_exe_rw": False,
     "sec_verify_integrity": True,
     "sec_resource_limits": False,
     "sec_memory_limit": "2G",
@@ -327,6 +328,13 @@ class MainWindow(QMainWindow):
         self.sec_disable_zdrive.setChecked(True)
         self.sec_disable_zdrive.stateChanged.connect(self._save_settings_from_ui)
         security_layout.addWidget(self.sec_disable_zdrive)
+
+        self.sec_exe_rw = QCheckBox(
+            "Permetti scrittura nella cartella del gioco (salvataggi accanto all'exe, "
+            "disattiva solo se necessario)")
+        self.sec_exe_rw.setChecked(False)
+        self.sec_exe_rw.stateChanged.connect(self._save_settings_from_ui)
+        security_layout.addWidget(self.sec_exe_rw)
 
         self.sec_verify_integrity = QCheckBox(
             "Verifica integrità prefix dopo l'esecuzione (confronta file modificati)")
@@ -854,6 +862,7 @@ class MainWindow(QMainWindow):
         self.settings["sec_loopback"] = self.sec_loopback.isChecked()
         self.settings["sec_allow_network"] = self.sec_allow_network.isChecked()
         self.settings["sec_disable_zdrive"] = self.sec_disable_zdrive.isChecked()
+        self.settings["sec_exe_rw"] = self.sec_exe_rw.isChecked()
         self.settings["sec_verify_integrity"] = self.sec_verify_integrity.isChecked()
         self.settings["sec_resource_limits"] = self.sec_resource_limits.isChecked()
         self.settings["sec_memory_limit"] = self.sec_memory_limit_edit.text().strip() or "2G"
@@ -870,6 +879,7 @@ class MainWindow(QMainWindow):
         self.sec_loopback.setChecked(self.settings.get("sec_loopback", False))
         self.sec_allow_network.setChecked(self.settings.get("sec_allow_network", False))
         self.sec_disable_zdrive.setChecked(self.settings.get("sec_disable_zdrive", True))
+        self.sec_exe_rw.setChecked(self.settings.get("sec_exe_rw", False))
         self.sec_verify_integrity.setChecked(self.settings.get("sec_verify_integrity", True))
         self.sec_resource_limits.setChecked(self.settings.get("sec_resource_limits", False))
         self.sec_memory_limit_edit.setText(self.settings.get("sec_memory_limit", "2G"))
@@ -911,6 +921,7 @@ class MainWindow(QMainWindow):
         env.insert("SANDBOX_ALLOW_LOOPBACK", _val("SANDBOX_ALLOW_LOOPBACK", self.sec_loopback))
         env.insert("SANDBOX_ALLOW_NETWORK", _val("SANDBOX_ALLOW_NETWORK", self.sec_allow_network))
         env.insert("SANDBOX_DISABLE_ZDRIVE", _val("SANDBOX_DISABLE_ZDRIVE", self.sec_disable_zdrive))
+        env.insert("SANDBOX_EXE_RW", _val("SANDBOX_EXE_RW", self.sec_exe_rw))
         return env
 
     def _browse_prefix_root(self):
@@ -982,6 +993,7 @@ class MainWindow(QMainWindow):
             "loopback": self.sec_loopback.isChecked(),
             "allow_network": self.sec_allow_network.isChecked(),
             "disable_zdrive": self.sec_disable_zdrive.isChecked(),
+            "exe_rw": self.sec_exe_rw.isChecked(),
             "resource_limits": self.sec_resource_limits.isChecked(),
         }
 
