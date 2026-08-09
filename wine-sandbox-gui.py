@@ -77,6 +77,7 @@ DEFAULT_SETTINGS = {
     "sec_unshare_pid": True,
     "sec_unshare_ipc": False,
     "sec_wayland_only": True,
+    "sec_x11_fallback": False,
     "sec_dri": True,
     "sec_gpu_cap_sysadmin": False,
     "sec_audio": True,
@@ -97,6 +98,7 @@ DEFAULT_SETTINGS = {
     "enable_desktop_launcher_creation": False,
     "unmount_on_exit": True,
     "bchunk_output_dir": "",
+    "dgvoodoo_version": "v2.52",
 }
 
 WINDOWS_VERSIONS = [
@@ -296,7 +298,14 @@ CODEC_WINETRICKS_VERBS = [
     "icodecs", "wmp9", "wmp11",
 ]
 
-DGVOODOO_REPO_API = "https://api.github.com/repos/dege-diosg/dgVoodoo2/releases/latest"
+# Versione dgVoodoo2 bloccata (pinning) alla 2.52: le release 2.53+ hanno
+# rimosso l'output D3D9 e le 2.6x-2.8x su Wine causano crash in WineD3D
+# durante la traduzione degli shader SM4 (vedi WineHQ bug 58731).
+# La 2.52 è l'ultima versione con output D3D9 (utile su Wine dove D3D11
+# crasha). L'utente può scegliere "latest" dalla GUI se vuole l'ultima release.
+DGVOODOO_REPO_API_STABLE = "https://api.github.com/repos/dege-diosg/dgVoodoo2/releases/tags/v2.52"
+DGVOODOO_REPO_API_LATEST = "https://api.github.com/repos/dege-diosg/dgVoodoo2/releases/latest"
+DGVOODOO_ZIP_PASSWORD = "dege"  # password dgVoodoo2 per archivi crittati da dege.fw.hu
 
 REQUIRED_TOOLS = [
     ("wine", "Esecuzione dei giochi Windows"),
@@ -325,17 +334,21 @@ def save_json(path, data):
 
 
 class DgVoodooDownloadThread(QThread):
-    """Scarica ed estrae l'ultima release di dgVoodoo2 da GitHub, in background
+    """Scarica ed estrae una release di dgVoodoo2 da GitHub, in background
     per non bloccare l'interfaccia durante il download."""
     log = Signal(str)
     finished_ok = Signal(str)   # percorso cartella estratta
     finished_error = Signal(str)
 
+    def __init__(self, api_url):
+        super().__init__()
+        self.api_url = api_url
+
     def run(self):
         try:
-            self.log.emit(f"Interrogo l'API GitHub: {DGVOODOO_REPO_API}")
+            self.log.emit(f"Interrogo l'API GitHub: {self.api_url}")
             req = urllib.request.Request(
-                DGVOODOO_REPO_API, headers={"User-Agent": "wine-sandbox-gui"})
+                self.api_url, headers={"User-Agent": "wine-sandbox-gui"})
             with urllib.request.urlopen(req, timeout=20) as resp:
                 release_data = json.loads(resp.read().decode())
 
@@ -344,7 +357,7 @@ class DgVoodooDownloadThread(QThread):
                 None
             )
             if not zip_asset:
-                self.finished_error.emit("Nessun asset .zip trovato nell'ultima release di dgVoodoo2.")
+                self.finished_error.emit("Nessun asset .zip trovato nella release di dgVoodoo2.")
                 return
 
             download_url = zip_asset["browser_download_url"]
@@ -364,6 +377,7 @@ class DgVoodooDownloadThread(QThread):
             import zipfile
             extract_dir = os.path.join(tmp_dir, "estratto")
             with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.setpassword(DGVOODOO_ZIP_PASSWORD.encode())
                 zf.extractall(extract_dir)
 
             self.finished_ok.emit(extract_dir)
@@ -839,6 +853,11 @@ class MainWindow(QMainWindow):
         self.btn_suggest_config.clicked.connect(self._on_suggest_config_clicked)
         left_layout.addWidget(self.btn_suggest_config)
 
+        self.game_x11_fallback_cb = QCheckBox(
+            "Fallback X11/XWayland per questo gioco (legacy, meno sicuro)")
+        self.game_x11_fallback_cb.stateChanged.connect(self._on_game_x11_fallback_changed)
+        left_layout.addWidget(self.game_x11_fallback_cb)
+
         self.btn_scan_file_tab = QPushButton("🛡 Scansiona file...")
         self.btn_scan_file_tab.clicked.connect(self._on_scan_file_clicked)
         left_layout.addWidget(self.btn_scan_file_tab)
@@ -874,6 +893,14 @@ class MainWindow(QMainWindow):
         self.sec_wayland_only.setChecked(True)
         self.sec_wayland_only.stateChanged.connect(self._on_wayland_toggle_changed)
         security_layout.addWidget(self.sec_wayland_only)
+
+        self.sec_x11_fallback = QCheckBox(
+            "  🟠 Fallback X11/XWayland per giochi legacy non supportati dal driver "
+            "Wayland nativo (meno sicuro: un client X11 può intercettare tastiera/"
+            "screenshot di altre app X11 - la sandbox bwrap resta comunque attiva)")
+        self.sec_x11_fallback.setChecked(False)
+        self.sec_x11_fallback.stateChanged.connect(self._on_x11_fallback_toggle_changed)
+        security_layout.addWidget(self.sec_x11_fallback)
 
         self.sec_dri = QCheckBox("Consenti GPU/accelerazione 3D (serve per la maggior parte dei giochi)")
         self.sec_dri.setChecked(True)
@@ -945,7 +972,14 @@ class MainWindow(QMainWindow):
 
         security_layout.addLayout(resource_row)
 
-        left_layout.addWidget(security_box)
+        # Il box sicurezza ha molti toggle e schiaccerebbe la lista giochi:
+        # vive in una scroll area (stesso approccio del tab Sistema).
+        security_scroll = QScrollArea()
+        security_scroll.setWidgetResizable(True)
+        security_scroll.setFrameShape(QScrollArea.NoFrame)
+        security_scroll.setWidget(security_box)
+        security_scroll.setMinimumHeight(160)
+        left_layout.addWidget(security_scroll)
 
         left_layout.addWidget(QLabel(""))
         left_layout.addWidget(QLabel("Nuova installazione:"))
@@ -1227,6 +1261,20 @@ class MainWindow(QMainWindow):
         )
         dgvoodoo_info.setWordWrap(True)
         dgvoodoo_layout.addWidget(dgvoodoo_info)
+
+        # Selettore versione dgVoodoo2
+        dgvoodoo_version_row = QHBoxLayout()
+        dgvoodoo_version_row.addWidget(QLabel("Versione:"))
+        self.dgvoodoo_version_combo = QComboBox()
+        self.dgvoodoo_version_combo.addItem("v2.52 (compatibile Wine, output D3D9)", "v2.52")
+        self.dgvoodoo_version_combo.addItem("Ultima release (potrebbe non funzionare su Wine)", "latest")
+        self.dgvoodoo_version_combo.setCurrentText(
+            "v2.52 (compatibile Wine, output D3D9)" if self.settings.get("dgvoodoo_version", "v2.52") == "v2.52"
+            else "Ultima release (potrebbe non funzionare su Wine)")
+        self.dgvoodoo_version_combo.currentIndexChanged.connect(self._on_dgvoodoo_version_changed)
+        dgvoodoo_version_row.addWidget(self.dgvoodoo_version_combo)
+        dgvoodoo_version_row.addStretch()
+        dgvoodoo_layout.addLayout(dgvoodoo_version_row)
 
         self.btn_download_dgvoodoo = QPushButton("⬇ Scarica e installa dgVoodoo2 in una cartella di gioco...")
         self.btn_download_dgvoodoo.clicked.connect(self._on_download_dgvoodoo)
@@ -1630,6 +1678,7 @@ class MainWindow(QMainWindow):
         self.settings["sec_unshare_pid"] = self.sec_unshare_pid.isChecked()
         self.settings["sec_unshare_ipc"] = self.sec_unshare_ipc.isChecked()
         self.settings["sec_wayland_only"] = self.sec_wayland_only.isChecked()
+        self.settings["sec_x11_fallback"] = self.sec_x11_fallback.isChecked()
         self.settings["sec_dri"] = self.sec_dri.isChecked()
         self.settings["sec_gpu_cap_sysadmin"] = self.sec_gpu_cap_sysadmin.isChecked()
         self.settings["sec_audio"] = self.sec_audio.isChecked()
@@ -1658,6 +1707,7 @@ class MainWindow(QMainWindow):
         self.sec_cap_drop.setChecked(self.settings.get("sec_cap_drop", True))
         self.sec_unshare_pid.setChecked(self.settings.get("sec_unshare_pid", True))
         self.sec_wayland_only.setChecked(self.settings.get("sec_wayland_only", True))
+        self.sec_x11_fallback.setChecked(self.settings.get("sec_x11_fallback", False))
         # sec_unshare_ipc eredita lo stato di wayland_only se l'utente non l'ha mai
         # salvato esplicitamente: con il driver nativo Wayland non c'è X11/MIT-SHM,
         # quindi l'isolamento IPC è sicuro e viene abilitato di default.
@@ -1711,6 +1761,40 @@ class MainWindow(QMainWindow):
             self.sec_unshare_ipc.blockSignals(True)
             self.sec_unshare_ipc.setChecked(self.sec_wayland_only.isChecked())
             self.sec_unshare_ipc.blockSignals(False)
+        # Mutua esclusione col fallback X11: se riattivo Wayland, spengo X11.
+        if self.sec_wayland_only.isChecked() and self.sec_x11_fallback.isChecked():
+            self.sec_x11_fallback.blockSignals(True)
+            self.sec_x11_fallback.setChecked(False)
+            self.sec_x11_fallback.blockSignals(False)
+        self._save_settings_from_ui()
+
+    def _on_x11_fallback_toggle_changed(self):
+        if self.sec_x11_fallback.isChecked():
+            reply = QMessageBox.warning(
+                self, "Usare il fallback X11/XWayland?",
+                "Stai attivando il fallback X11/XWayland per giochi legacy non supportati "
+                "dal driver Wayland nativo (finestre GDI/GL, es. titoli DirectX8-era).\n\n"
+                "⚠️ Meno sicuro di Wayland: un client X11 può intercettare tastiera/"
+                "screenshot di tutte le finestre X11 (incluse altre app in XWayland). "
+                "La sandbox bwrap resta comunque attiva (rete off, capability droppate, "
+                "home nascosta).\n\nUsalo SOLO per titoli che col driver nativo non partono.\n\n"
+                "Confermi?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                self.sec_x11_fallback.blockSignals(True)
+                self.sec_x11_fallback.setChecked(False)
+                self.sec_x11_fallback.blockSignals(False)
+                return
+        # Fallback X11 attivo: Wayland e l'isolamento IPC vanno spenti (in X11
+        # --unshare-ipc spezzerebbe MIT-SHM e farebbe crashare i giochi).
+        self.sec_wayland_only.blockSignals(True)
+        self.sec_wayland_only.setChecked(False)
+        self.sec_wayland_only.blockSignals(False)
+        if "sec_unshare_ipc" not in self._raw_settings:
+            self.sec_unshare_ipc.blockSignals(True)
+            self.sec_unshare_ipc.setChecked(False)
+            self.sec_unshare_ipc.blockSignals(False)
         self._save_settings_from_ui()
 
     def _on_network_toggle_changed(self):
@@ -1730,6 +1814,11 @@ class MainWindow(QMainWindow):
                 return
         self._save_settings_from_ui()
 
+    def _on_dgvoodoo_version_changed(self):
+        data = self.dgvoodoo_version_combo.currentData()
+        self.settings["dgvoodoo_version"] = data
+        self._save_settings_from_ui()
+
     def _sandbox_env(self, overrides=None):
         """Costruisce l'ambiente QProcess con i toggle di sicurezza correnti."""
         overrides = overrides or {}
@@ -1743,6 +1832,7 @@ class MainWindow(QMainWindow):
         env.insert("SANDBOX_UNSHARE_PID", _val("SANDBOX_UNSHARE_PID", self.sec_unshare_pid))
         env.insert("SANDBOX_UNSHARE_IPC", _val("SANDBOX_UNSHARE_IPC", self.sec_unshare_ipc))
         env.insert("SANDBOX_WAYLAND_ONLY", _val("SANDBOX_WAYLAND_ONLY", self.sec_wayland_only))
+        env.insert("SANDBOX_X11_FALLBACK", _val("SANDBOX_X11_FALLBACK", self.sec_x11_fallback))
         env.insert("SANDBOX_DRI", _val("SANDBOX_DRI", self.sec_dri))
         env.insert("SANDBOX_GPU_CAP_SYSADMIN", _val("SANDBOX_GPU_CAP_SYSADMIN", self.sec_gpu_cap_sysadmin))
         env.insert("SANDBOX_AUDIO", _val("SANDBOX_AUDIO", self.sec_audio))
@@ -1791,6 +1881,40 @@ class MainWindow(QMainWindow):
         self.btn_play.setEnabled(has_selection)
         self.btn_remove.setEnabled(has_selection)
         self.btn_suggest_config.setEnabled(has_selection)
+        self.game_x11_fallback_cb.setEnabled(has_selection)
+        self.game_x11_fallback_cb.blockSignals(True)
+        if has_selection:
+            game = self.game_list.currentItem().data(Qt.UserRole)
+            self.game_x11_fallback_cb.setChecked(bool(game.get("x11_fallback", False)))
+        else:
+            self.game_x11_fallback_cb.setChecked(False)
+        self.game_x11_fallback_cb.blockSignals(False)
+
+    def _on_game_x11_fallback_changed(self):
+        item = self.game_list.currentItem()
+        if not item:
+            self.game_x11_fallback_cb.blockSignals(True)
+            self.game_x11_fallback_cb.setChecked(False)
+            self.game_x11_fallback_cb.blockSignals(False)
+            return
+        game = item.data(Qt.UserRole)
+        enable = self.game_x11_fallback_cb.isChecked()
+        if enable:
+            reply = QMessageBox.warning(
+                self, "Fallback X11/XWayland per questo gioco?",
+                f"'{game['name']}' verrà avviato con il fallback X11/XWayland.\n\n"
+                "⚠️ Meno sicuro di Wayland: un client X11 può intercettare tastiera/"
+                "screenshot di altre app X11. La sandbox bwrap resta comunque attiva.\n\n"
+                "Usalo SOLO se il gioco non parte col driver Wayland nativo.\n\nConfermi?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                self.game_x11_fallback_cb.blockSignals(True)
+                self.game_x11_fallback_cb.setChecked(False)
+                self.game_x11_fallback_cb.blockSignals(False)
+                return
+        game["x11_fallback"] = enable
+        save_json(GAMES_FILE, self.games)
 
     def _refresh_game_list(self):
         self.game_list.clear()
@@ -1836,6 +1960,7 @@ class MainWindow(QMainWindow):
             "unshare_pid": self.sec_unshare_pid.isChecked(),
             "unshare_ipc": self.sec_unshare_ipc.isChecked(),
             "wayland_only": self.sec_wayland_only.isChecked(),
+            "x11_fallback": self.sec_x11_fallback.isChecked(),
             "dri": self.sec_dri.isChecked(),
             "gpu_cap_sysadmin": self.sec_gpu_cap_sysadmin.isChecked(),
             "audio": self.sec_audio.isChecked(),
@@ -1982,7 +2107,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Errore", f"L'eseguibile non esiste più:\n{exe}")
             return
 
-        self._run_process([prefix, exe])
+        env_overrides = {}
+        if game.get("x11_fallback"):
+            env_overrides["SANDBOX_X11_FALLBACK"] = "1"
+        self._run_process([prefix, exe], env_overrides=env_overrides)
 
     def _on_remove_clicked(self):
         item = self.game_list.currentItem()
@@ -3237,7 +3365,7 @@ class MainWindow(QMainWindow):
         self.wine_tool_process.start(ws_program, ws_args)
 
     # ------------------------------------------------------------------
-    # dgVoodoo2 (download automatico dall'ultima release GitHub)
+    # dgVoodoo2 (download: v2.52 stabile compatibile Wine / ultima release)
     # ------------------------------------------------------------------
     def _on_download_dgvoodoo(self):
         if self.dgvoodoo_thread is not None and self.dgvoodoo_thread.isRunning():
@@ -3274,9 +3402,14 @@ class MainWindow(QMainWindow):
             return
         arch_folder = "x86" if arch_choice.startswith("x86") else "x64"
 
-        self._wine_log(f"\nAvvio download dgVoodoo2 (architettura {arch_folder}) verso: {target_folder}")
+        # Scegli versione in base al setting
+        version_key = self.settings.get("dgvoodoo_version", "v2.52")
+        api_url = DGVOODOO_REPO_API_STABLE if version_key == "v2.52" else DGVOODOO_REPO_API_LATEST
+        version_label = "v2.52 (stabile)" if version_key == "v2.52" else "ultima release"
 
-        self.dgvoodoo_thread = DgVoodooDownloadThread()
+        self._wine_log(f"\nAvvio download dgVoodoo2 {version_label} (architettura {arch_folder}) verso: {target_folder}")
+
+        self.dgvoodoo_thread = DgVoodooDownloadThread(api_url)
         self.dgvoodoo_thread.log.connect(self._wine_log)
         self.dgvoodoo_thread.finished_ok.connect(
             lambda extract_dir: self._install_dgvoodoo_files(extract_dir, target_folder, arch_folder))

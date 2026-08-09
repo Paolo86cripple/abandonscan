@@ -64,6 +64,7 @@ Toggle `SANDBOX_*` (default indicato tra parentesi):
 | `SANDBOX_CAP_DROP` | 1 | Droppa tutte le capability Linux |
 | `SANDBOX_UNSHARE_PID` | 1 | Isola la visibilità dei processi |
 | `SANDBOX_WAYLAND_ONLY` | **1** | Espone SOLO Wayland nativo, X11 mai (vedi sotto) |
+| `SANDBOX_X11_FALLBACK` | 0 | Fallback esplicito X11/XWayland per giochi legacy non supportati dal driver nativo (finestre GDI/GL, es. DirectX8-era). Vince su `WAYLAND_ONLY` e spegne l'isolamento IPC (MIT-SHM). ⚠️ Meno sicuro: un client X11 può intercettare tastiera/screenshot di altre app X11 (XWayland); bwrap resta attivo. |
 | `SANDBOX_UNSHARE_IPC` | 1 con Wayland / 0 in X11 | Isola i segmenti SysV; OFF se si usa X11 |
 | `SANDBOX_DRI` | 1 | Passa i render node GPU (`/dev/dri/renderD*`) |
 | `SANDBOX_GPU_CAP_SYSADMIN` | 0 | Espone `/dev/dri/card*` intero + CAP_SYS_ADMIN (compatibilità) |
@@ -82,7 +83,16 @@ script sia in `sec_wayland_only: True` nei DEFAULT_SETTINGS) `DISPLAY` viene
 svuotato, `winex11.drv=d` (Wine 10+, driver nativo `winewayland.drv`), nessun
 socket X11 e nessuna `XAUTHORITY` esposti. X11/XWayland è un fallback opt-in
 (`SANDBOX_WAYLAND_ONLY=0`) solo per giochi legacy non supportati dal driver
-nativo.
+nativo (es. finestre GDI/GL dei titoli DirectX8-era: il driver nativo non le
+supporta → `nodrv_CreateWindow`). In GUI il fallback si attiva in due modi
+indipendenti, entrambi mappati su `SANDBOX_X11_FALLBACK=1` (che vince su
+`WAYLAND_ONLY` e spegne automaticamente `--unshare-ipc`):
+- **Globale**: checkbox `sec_x11_fallback` (gruppo sicurezza, tab Giochi),
+  vale per tutti i lanci finché attiva;
+- **Per-gioco**: checkbox "Fallback X11/XWayland per questo gioco", salvata in
+  `games.json` (`x11_fallback`), passata come override env al lancio di quel
+  gioco.
+Basta uno dei due per forzare X11 su quel gioco.
 
 ## Convenzioni di codice (AbandonScan)
 
@@ -120,6 +130,10 @@ Se introduci un sistema di test/lint, aggiorna questa sezione.
   memoria condivisa X11 MIT-SHM (`X_ShmPutImage` → "Unhandled page fault") e fa
   crashare tutti i giochi X11. Con il driver nativo Wayland (default) invece va
   bene ed è attivo.
+- **`SANDBOX_X11_FALLBACK=1` deve sempre spegnere `--unshare-ipc`**: lo script
+  lo fa automaticamente (forza `WAYLAND_ONLY=0` e `UNSHARE_IPC=0`); la GUI in
+  quel caso spegne anche `sec_wayland_only` e `sec_unshare_ipc`. Non
+  reintrodurre mai `--unshare-ipc` in modalità X11.
 - **`/sys` intero in sola lettura è obbligatorio**: Wine/Mesa lo usano per
   enumerare CPU e GPU. Senza, Wine casca su llvmpipe (rendering software) e i
   giochi 3D crashano. `--ro-bind /sys /sys` + `--tmpfs /sys/kernel/security`.
