@@ -29,6 +29,7 @@ import sys
 import os
 import re
 import json
+import hashlib
 import shutil
 import tempfile
 import subprocess
@@ -78,6 +79,11 @@ DEFAULT_SETTINGS = {
     "sec_disable_zdrive": True,
     "sec_exe_rw": False,
     "winecfg_ensure_zdrive": True,
+    "scan_use_clamav": True,
+    "scan_use_virustotal": False,
+    "scan_use_falcon": False,
+    "virustotal_api_key": "",
+    "falcon_api_key": "",
     "sec_verify_integrity": True,
     "sec_resource_limits": False,
     "sec_memory_limit": "2G",
@@ -503,6 +509,213 @@ class LutrisLookupThread(QThread):
         }
 
 
+VT_API_FILES = "https://www.virustotal.com/api/v3/files/"
+VT_API_UPLOAD = "https://www.virustotal.com/api/v3/files"
+FALCON_API_SUBMIT = "https://www.hybrid-analysis.com/api/v2/submit/file"
+FALCON_API_REPORT = "https://www.hybrid-analysis.com/api/v2/report/"
+
+# Costanti VirusTotal/Falcon per i risultati (riadattate dal flusso di scan-game.sh)
+SCAN_STATUS_SKIPPED = "skipped"
+
+
+class ScanThread(QThread):
+    """Scansiona un file (es. un installer) a piacimento, in background:
+    1) ClamAV locale (se installato), 2) VirusTotal (hash o upload),
+    3) Hybrid Analysis/Falcon Sandbox (solo se VirusTotal segnala positivi).
+    Nessuna scansione è automatica o bloccante."""
+    log = Signal(str)
+    finished = Signal(dict)
+
+    def __init__(self, filepath, use_clamav=True, use_virustotal=False,
+                 use_falcon=False, vt_api_key="", falcon_api_key=""):
+        super().__init__()
+        self.filepath = filepath
+        self.use_clamav = use_clamav
+        self.use_virustotal = use_virustotal
+        self.use_falcon = use_falcon
+        self.vt_api_key = vt_api_key
+        self.falcon_api_key = falcon_api_key
+
+    def run(self):
+        result = {
+            "file": self.filepath,
+            "sha256": None,
+            "clamav": {"status": SCAN_STATUS_SKIPPED, "detail": ""},
+            "virustotal": {"status": SCAN_STATUS_SKIPPED, "detail": "",
+                           "malicious": 0, "suspicious": 0, "harmless": 0,
+                           "undetected": 0, "report_url": None, "analysis_id": None},
+            "falcon": {"status": SCAN_STATUS_SKIPPED, "detail": "",
+                       "report_url": None},
+        }
+        try:
+            self.log.emit(f"Calcolo SHA256 di: {self.filepath}")
+            sha256 = self._compute_sha256(self.filepath)
+            result["sha256"] = sha256
+            self.log.emit(f"SHA256: {sha256}")
+
+            if self.use_clamav:
+                self._run_clamav(result)
+
+            if self.use_virustotal and self.vt_api_key:
+                self._run_virustotal(result)
+
+            if (self.use_falcon and self.falcon_api_key
+                    and result["virustotal"]["status"] in ("flagged", "uploaded")
+                    and (result["virustotal"]["malicious"] > 0
+                         or result["virustotal"]["suspicious"] > 0)):
+                self._run_falcon(result)
+
+            self.finished.emit(result)
+        except Exception as e:
+            result["clamav"]["status"] = "error"
+            self.log.emit(f"ERRORE durante la scansione: {e}")
+            self.finished.emit(result)
+
+    @staticmethod
+    def _compute_sha256(filepath):
+        h = hashlib.sha256()
+        with open(filepath, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _run_clamav(self, result):
+        clamscan = shutil.which("clamscan")
+        if not clamscan:
+            result["clamav"]["status"] = "skipped"
+            result["clamav"]["detail"] = "clamscan non trovato sul sistema, ClamAV saltato."
+            self.log.emit(result["clamav"]["detail"])
+            return
+        self.log.emit(f"Avvio clamscan su: {self.filepath}")
+        proc = subprocess.run(
+            [clamscan, "--no-summary", "--infected", self.filepath],
+            capture_output=True, text=True)
+        output = (proc.stdout + proc.stderr).strip()
+        found = [line for line in output.splitlines() if line.strip().endswith("FOUND")]
+        if found:
+            result["clamav"]["status"] = "infected"
+            result["clamav"]["detail"] = "\n".join(found)
+        elif "OK" in output or proc.returncode in (0,):
+            result["clamav"]["status"] = "ok"
+            result["clamav"]["detail"] = "Nessuna minaccia rilevata."
+        else:
+            result["clamav"]["status"] = "ok"
+            result["clamav"]["detail"] = output or "Nessuna minaccia rilevata."
+        self.log.emit(f"ClamAV: {result['clamav']['detail']}")
+
+    def _run_virustotal(self, result):
+        self.log.emit("Interrogo VirusTotal (hash)...")
+        try:
+            req = urllib.request.Request(
+                VT_API_FILES + result["sha256"],
+                headers={"x-apikey": self.vt_api_key, "User-Agent": "wine-sandbox-gui"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                result["virustotal"]["status"] = "error"
+                result["virustotal"]["detail"] = f"Errore VirusTotal: {e.code} {e.reason}"
+                self.log.emit(result["virustotal"]["detail"])
+                return
+            result["virustotal"]["status"] = "uploaded"
+            result["virustotal"]["detail"] = "Hash non presente su VirusTotal, avvio upload..."
+            self.log.emit(result["virustotal"]["detail"])
+            self._vt_upload(result)
+            return
+        except Exception as e:
+            result["virustotal"]["status"] = "error"
+            result["virustotal"]["detail"] = f"Errore di rete VirusTotal: {e}"
+            self.log.emit(result["virustotal"]["detail"])
+            return
+
+        stats = (data.get("data") or {}).get("attributes", {}).get("last_analysis_stats", {})
+        result["virustotal"]["malicious"] = stats.get("malicious", 0)
+        result["virustotal"]["suspicious"] = stats.get("suspicious", 0)
+        result["virustotal"]["harmless"] = stats.get("harmless", 0)
+        result["virustotal"]["undetected"] = stats.get("undetected", 0)
+        result["virustotal"]["report_url"] = (
+            "https://www.virustotal.com/gui/file/" + result["sha256"])
+        if result["virustotal"]["malicious"] > 0 or result["virustotal"]["suspicious"] > 0:
+            result["virustotal"]["status"] = "flagged"
+        else:
+            result["virustotal"]["status"] = "clean"
+        self.log.emit(
+            f"VirusTotal: malevoli={result['virustotal']['malicious']}, "
+            f"sospetti={result['virustotal']['suspicious']}, "
+            f"puliti={result['virustotal']['harmless']}")
+
+    def _vt_upload(self, result):
+        self.log.emit("Upload del file a VirusTotal (può richiedere qualche minuto)...")
+        try:
+            boundary = "----wineSandboxGUI" + hashlib.sha1(os.urandom(16)).hexdigest()
+            body = _build_multipart_body("file", self.filepath, boundary)
+            req = urllib.request.Request(
+                VT_API_UPLOAD, data=body,
+                headers={"x-apikey": self.vt_api_key,
+                         "Content-Type": f"multipart/form-data; boundary={boundary}",
+                         "User-Agent": "wine-sandbox-gui"})
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                data = json.loads(resp.read().decode())
+            analysis_id = (data.get("data") or {}).get("id")
+            if analysis_id:
+                result["virustotal"]["analysis_id"] = analysis_id
+                result["virustotal"]["detail"] = (
+                    f"Upload avviato (analysis id: {analysis_id}). "
+                    "L'analisi può richiedere 1-2 minuti: il file risulterà in analisi.")
+            else:
+                result["virustotal"]["detail"] = "Upload avviato ma senza analysis id nella risposta."
+            self.log.emit(result["virustotal"]["detail"])
+        except Exception as e:
+            result["virustotal"]["status"] = "error"
+            result["virustotal"]["detail"] = f"Errore durante l'upload a VirusTotal: {e}"
+            self.log.emit(result["virustotal"]["detail"])
+
+    def _run_falcon(self, result):
+        self.log.emit("VirusTotal ha segnalato positivi: avvio analisi comportamentale Falcon Sandbox...")
+        try:
+            boundary = "----wineSandboxGUI" + hashlib.sha1(os.urandom(16)).hexdigest()
+            body = _build_multipart_body("file", self.filepath, boundary)
+            req = urllib.request.Request(
+                FALCON_API_SUBMIT, data=body,
+                headers={"api-key": self.falcon_api_key,
+                         "user-agent": "Falcon Sandbox",
+                         "Content-Type": f"multipart/form-data; boundary={boundary}"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read().decode())
+            job_id = data.get("job_id")
+            sha256 = data.get("sha256")
+            if job_id:
+                result["falcon"]["status"] = "submitted"
+                result["falcon"]["report_url"] = (
+                    f"https://www.hybrid-analysis.com/sample/{sha256}/{job_id}")
+                result["falcon"]["detail"] = (
+                    f"Analisi comportamentale avviata (può richiedere fino a ~15 minuti). "
+                    f"Job ID: {job_id}")
+            else:
+                result["falcon"]["status"] = "error"
+                result["falcon"]["detail"] = f"Falcon Sandbox: invio non riuscito. {data}"
+            self.log.emit(result["falcon"]["detail"])
+        except Exception as e:
+            result["falcon"]["status"] = "error"
+            result["falcon"]["detail"] = f"Errore Falcon Sandbox: {e}"
+            self.log.emit(result["falcon"]["detail"])
+
+
+def _build_multipart_body(field_name, filepath, boundary):
+    """Costruisce il body multipart/form-data per un upload di un singolo file."""
+    filename = os.path.basename(filepath)
+    parts = []
+    parts.append(f"--{boundary}\r\n".encode())
+    parts.append(
+        (f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n').encode())
+    parts.append(b"Content-Type: application/octet-stream\r\n\r\n")
+    with open(filepath, "rb") as f:
+        parts.append(f.read())
+    parts.append(b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    return b"".join(parts)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -617,6 +830,10 @@ class MainWindow(QMainWindow):
         self.btn_suggest_config = QPushButton("💡 Suggerisci configurazione")
         self.btn_suggest_config.clicked.connect(self._on_suggest_config_clicked)
         left_layout.addWidget(self.btn_suggest_config)
+
+        self.btn_scan_file_tab = QPushButton("🛡 Scansiona file...")
+        self.btn_scan_file_tab.clicked.connect(self._on_scan_file_clicked)
+        left_layout.addWidget(self.btn_scan_file_tab)
 
         security_box = QGroupBox("Sicurezza sandbox (si applica a Gioca e Installa)")
         security_layout = QVBoxLayout(security_box)
@@ -1071,6 +1288,62 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(config_box)
 
+        scan_box = QGroupBox("Scansione malware (a piacimento, non obbligatoria)")
+        scan_layout = QVBoxLayout(scan_box)
+        scan_info = QLabel(
+            "Scansiona un file (es. un installer scaricato) prima di eseguirlo. "
+            "Disponibile come pulsante indipendente qui sotto e come opzione durante "
+            "l'installazione di un nuovo gioco. Nessuna scansione è automatica."
+        )
+        scan_info.setWordWrap(True)
+        scan_layout.addWidget(scan_info)
+
+        self.scan_use_clamav_cb = QCheckBox(
+            "ClamAV locale (se installato - scansione istantanea, offline, gratuita)")
+        self.scan_use_clamav_cb.setChecked(True)
+        self.scan_use_clamav_cb.stateChanged.connect(self._save_settings_from_ui)
+        scan_layout.addWidget(self.scan_use_clamav_cb)
+
+        self.scan_use_vt_cb = QCheckBox("VirusTotal (hash + upload, richiede API key gratuita)")
+        self.scan_use_vt_cb.setChecked(False)
+        self.scan_use_vt_cb.stateChanged.connect(self._save_settings_from_ui)
+        scan_layout.addWidget(self.scan_use_vt_cb)
+
+        vt_key_row = QHBoxLayout()
+        vt_key_row.addWidget(QLabel("  VirusTotal API key:"))
+        self.vt_api_key_edit = QLineEdit()
+        self.vt_api_key_edit.setEchoMode(QLineEdit.Password)
+        self.vt_api_key_edit.editingFinished.connect(self._save_settings_from_ui)
+        vt_key_row.addWidget(self.vt_api_key_edit)
+        vt_link = QLabel("<a href='https://www.virustotal.com/gui/join-us'>Ottieni una API key gratuita</a>")
+        vt_link.setOpenExternalLinks(True)
+        vt_key_row.addWidget(vt_link)
+        scan_layout.addLayout(vt_key_row)
+
+        self.scan_use_falcon_cb = QCheckBox(
+            "Hybrid Analysis / Falcon Sandbox (analisi comportamentale completa, ~15 min, "
+            "richiede API key gratuita separata - usata solo se VirusTotal segnala qualcosa)")
+        self.scan_use_falcon_cb.setChecked(False)
+        self.scan_use_falcon_cb.stateChanged.connect(self._save_settings_from_ui)
+        scan_layout.addWidget(self.scan_use_falcon_cb)
+
+        falcon_key_row = QHBoxLayout()
+        falcon_key_row.addWidget(QLabel("  Hybrid Analysis API key:"))
+        self.falcon_api_key_edit = QLineEdit()
+        self.falcon_api_key_edit.setEchoMode(QLineEdit.Password)
+        self.falcon_api_key_edit.editingFinished.connect(self._save_settings_from_ui)
+        falcon_key_row.addWidget(self.falcon_api_key_edit)
+        falcon_link = QLabel("<a href='https://www.hybrid-analysis.com/signup'>Ottieni una API key gratuita</a>")
+        falcon_link.setOpenExternalLinks(True)
+        falcon_key_row.addWidget(falcon_link)
+        scan_layout.addLayout(falcon_key_row)
+
+        self.btn_scan_file = QPushButton("🛡 Scansiona file...")
+        self.btn_scan_file.clicked.connect(self._on_scan_file_clicked)
+        scan_layout.addWidget(self.btn_scan_file)
+
+        layout.addWidget(scan_box)
+
         layout.addWidget(QLabel("Log operazioni di sistema:"))
         self.system_log = QPlainTextEdit()
         self.system_log.setReadOnly(True)
@@ -1268,6 +1541,11 @@ class MainWindow(QMainWindow):
         self.settings["sec_disable_zdrive"] = self.sec_disable_zdrive.isChecked()
         self.settings["sec_exe_rw"] = self.sec_exe_rw.isChecked()
         self.settings["winecfg_ensure_zdrive"] = self.winecfg_ensure_zdrive_cb.isChecked()
+        self.settings["scan_use_clamav"] = self.scan_use_clamav_cb.isChecked()
+        self.settings["scan_use_virustotal"] = self.scan_use_vt_cb.isChecked()
+        self.settings["scan_use_falcon"] = self.scan_use_falcon_cb.isChecked()
+        self.settings["virustotal_api_key"] = self.vt_api_key_edit.text().strip()
+        self.settings["falcon_api_key"] = self.falcon_api_key_edit.text().strip()
         self.settings["sec_verify_integrity"] = self.sec_verify_integrity.isChecked()
         self.settings["sec_resource_limits"] = self.sec_resource_limits.isChecked()
         self.settings["sec_memory_limit"] = self.sec_memory_limit_edit.text().strip() or "2G"
@@ -1289,6 +1567,11 @@ class MainWindow(QMainWindow):
         self.sec_disable_zdrive.setChecked(self.settings.get("sec_disable_zdrive", True))
         self.sec_exe_rw.setChecked(self.settings.get("sec_exe_rw", False))
         self.winecfg_ensure_zdrive_cb.setChecked(self.settings.get("winecfg_ensure_zdrive", True))
+        self.scan_use_clamav_cb.setChecked(self.settings.get("scan_use_clamav", True))
+        self.scan_use_vt_cb.setChecked(self.settings.get("scan_use_virustotal", False))
+        self.scan_use_falcon_cb.setChecked(self.settings.get("scan_use_falcon", False))
+        self.vt_api_key_edit.setText(self.settings.get("virustotal_api_key", ""))
+        self.falcon_api_key_edit.setText(self.settings.get("falcon_api_key", ""))
         self.sec_verify_integrity.setChecked(self.settings.get("sec_verify_integrity", True))
         self.sec_resource_limits.setChecked(self.settings.get("sec_resource_limits", False))
         self.sec_memory_limit_edit.setText(self.settings.get("sec_memory_limit", "2G"))
@@ -1897,6 +2180,140 @@ class MainWindow(QMainWindow):
         self._refresh_game_list()
         self._log(f"Aggiunto '{name.strip()}' alla libreria.")
 
+    def _on_scan_file_clicked(self):
+        """Pulsante indipendente 'Scansiona file...': sceglie un qualsiasi file
+        (es. un installer scaricato) e lo scansiona a piacimento con i tool
+        abilitati nelle impostazioni. Nessuna scansione automatica."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Seleziona il file da scansionare",
+            self.settings["games_root"], "Tutti i file (*)")
+        if not filepath:
+            return
+        self._start_scan(filepath)
+
+    def _start_scan(self, filepath, on_finished=None):
+        """Avvia la scansione in background mostrando un dialog non modale di
+        avanzamento. Al termine mostra il riepilogo dei risultati e, se fornito,
+        invoca on_finished per continuare il flusso (es. installazione)."""
+        scan_dialog = QDialog(self)
+        scan_dialog.setWindowTitle("Scansione in corso...")
+        scan_dialog.resize(650, 420)
+        scan_layout = QVBoxLayout(scan_dialog)
+        scan_layout.addWidget(QLabel(
+            f"Scansione di:\n{filepath}\n\n"
+            "Puoi chiudere questa finestra quando vuoi: la scansione "
+            "continua in background e il risultato comparirà alla fine."))
+        log_view = QPlainTextEdit()
+        log_view.setReadOnly(True)
+        log_view.setStyleSheet("font-family: monospace; font-size: 10pt;")
+        scan_layout.addWidget(log_view, stretch=1)
+        close_btn = QPushButton("Chiudi")
+        close_btn.clicked.connect(scan_dialog.close)
+        scan_layout.addWidget(close_btn)
+
+        scan_dialog.setModal(False)
+        scan_dialog.show()
+
+        if not hasattr(self, "_scan_threads"):
+            self._scan_threads = []
+
+        def on_scan_finished(result):
+            log_view.appendPlainText("\n[scansione completata]")
+            self._show_scan_results(result)
+            if on_finished:
+                on_finished(result)
+            try:
+                self._scan_threads.remove(thread)
+            except ValueError:
+                pass
+
+        thread = ScanThread(
+            filepath,
+            use_clamav=self.settings.get("scan_use_clamav", True),
+            use_virustotal=self.settings.get("scan_use_virustotal", False),
+            use_falcon=self.settings.get("scan_use_falcon", False),
+            vt_api_key=self.settings.get("virustotal_api_key", ""),
+            falcon_api_key=self.settings.get("falcon_api_key", ""),
+        )
+        thread.log.connect(log_view.appendPlainText)
+        thread.finished.connect(on_scan_finished)
+        self._scan_threads.append(thread)
+        thread.start()
+
+    def _show_scan_results(self, result):
+        """Mostra un riepilogo dei risultati della scansione, con un pulsante
+        per aprire i report online quando disponibili."""
+        filepath = result["file"]
+        sha256 = result["sha256"] or "?"
+        lines = []
+        lines.append(f"File: {os.path.basename(filepath)}")
+        lines.append(f"SHA256: {sha256}")
+        lines.append("")
+
+        clamav = result["clamav"]
+        clamav_label = {
+            "ok": "✅ Pulito",
+            "infected": "⚠️ MINACCIA RILEVATA",
+            "error": "❌ Errore",
+            "skipped": "⚪ Non eseguita",
+        }.get(clamav["status"], clamav["status"])
+        lines.append(f"ClamAV: {clamav_label}")
+        if clamav["detail"]:
+            lines.append(f"  {clamav['detail']}")
+
+        vt = result["virustotal"]
+        if vt["status"] == "clean":
+            vt_label = f"✅ Pulito ({vt['malicious']} malevoli, {vt['suspicious']} sospetti)"
+        elif vt["status"] == "flagged":
+            vt_label = f"⚠️ SEGNALATO ({vt['malicious']} malevoli, {vt['suspicious']} sospetti)"
+        elif vt["status"] == "uploaded":
+            vt_label = "🔄 In analisi (upload inviato)"
+        elif vt["status"] == "error":
+            vt_label = "❌ Errore"
+        else:
+            vt_label = "⚪ Non eseguita"
+        lines.append(f"VirusTotal: {vt_label}")
+        if vt["detail"] and vt["status"] not in ("clean", "flagged"):
+            lines.append(f"  {vt['detail']}")
+
+        falcon = result["falcon"]
+        if falcon["status"] == "submitted":
+            lines.append("")
+            lines.append(f"Hybrid Analysis: 🔄 analisi comportamentale avviata")
+            if falcon["detail"]:
+                lines.append(f"  {falcon['detail']}")
+        elif falcon["status"] == "error":
+            lines.append("")
+            lines.append(f"Hybrid Analysis: ❌ {falcon['detail']}")
+
+        is_threat = (clamav.get("status") == "infected"
+                     or vt.get("status") == "flagged")
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Risultato scansione")
+        msg.setText("\n".join(lines))
+        msg.setIcon(QMessageBox.Critical if is_threat else QMessageBox.Information)
+        if not is_threat:
+            msg.setInformativeText(
+                "Se tutte le scansioni sono pulite o non sono state eseguite, "
+                "puoi procedere in sicurezza secondo il tuo giudizio.")
+        else:
+            msg.setInformativeText(
+                "La scansione ha rilevato una potenziale minaccia: sconsigliato "
+                "procedere. Puoi comunque decidere di continuare a tuo rischio.")
+        open_btn = None
+        report_url = None
+        if vt.get("report_url"):
+            report_url = vt["report_url"]
+        elif vt.get("analysis_id"):
+            report_url = f"https://www.virustotal.com/gui/analysis/{vt['analysis_id']}"
+        elif falcon.get("report_url"):
+            report_url = falcon["report_url"]
+        if report_url:
+            open_btn = msg.addButton("Apri report online", QMessageBox.ActionRole)
+            open_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(report_url)))
+        msg.addButton(QMessageBox.Close)
+        msg.exec()
+
     def _on_install_clicked(self):
         prefix = self._choose_prefix_path("Prefix per l'installazione")
         if not prefix:
@@ -1908,6 +2325,23 @@ class MainWindow(QMainWindow):
         if not setup_exe:
             return
 
+        # Scansione malware opzionale (a piacimento, non bloccante): se abilitata
+        # nelle impostazioni, chiede se si vuole scansionare il file prima di
+        # installarlo; l'utente può sempre saltare e procedere.
+        if (self.settings.get("scan_use_clamav", True)
+                or self.settings.get("scan_use_virustotal", False)
+                or self.settings.get("scan_use_falcon", False)):
+            reply = QMessageBox.question(
+                self, "Scansione malware (opzionale)",
+                f"Vuoi scansionare '{os.path.basename(setup_exe)}' prima di installarlo?\n\n"
+                "La scansione è facoltativa e non blocca nulla: puoi anche saltarla.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if reply == QMessageBox.Yes:
+                self._start_scan(setup_exe, on_finished=lambda result: self._proceed_install(prefix, setup_exe))
+                return
+        self._proceed_install(prefix, setup_exe)
+
+    def _proceed_install(self, prefix, setup_exe):
         self._log(f"Avvio installazione da: {setup_exe}")
         self._log("Al termine del setup, chiudi la finestra dell'installer per continuare.")
 
