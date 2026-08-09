@@ -192,11 +192,16 @@ else
     BWRAP_ARGS+=(--bind "$HOME" "$HOME")
 fi
 
-BWRAP_ARGS+=(--bind "$WINEPFX" "$WINEPFX" --tmpfs /tmp --tmpfs "/run/user/$(id -u)")
-
-# /run/media (dischi rimovibili/USB): bind-mount in sola lettura se esiste.
-# L'installer deve leggere il setup.exe ma non deve poter scrivere sul disco USB.
+# /run/media (dischi rimovibili/USB): bind-mount in sola lettura PRIMA del
+# prefix, così il --bind $WINEPFX successivo (più specifico) lo sovrascrive
+# con accesso in scrittura. L'ordine dei mount in bwrap conta: i path più
+# specifici dichiarati dopo vincono su quelli più generici dichiarati prima.
 [ -d /run/media ] && BWRAP_ARGS+=(--ro-bind-try /run/media /run/media)
+
+# Il prefix va bind-mountato DOPO /run/media (e qualsiasi altro mount broad)
+# così l'accesso in scrittura al prefix sovrascrive l'eventuale ro-bind del
+# parent. Questo è critico quando il prefix si trova su un disco USB.
+BWRAP_ARGS+=(--bind "$WINEPFX" "$WINEPFX" --tmpfs /tmp --tmpfs "/run/user/$(id -u)")
 
 if [ "$ALLOW_AUDIO" -eq 1 ]; then
     [ -S "$PIPEWIRE_SOCKET" ] && BWRAP_ARGS+=(--bind "$PIPEWIRE_SOCKET" "$PIPEWIRE_SOCKET")
