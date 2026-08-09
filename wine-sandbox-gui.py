@@ -213,9 +213,14 @@ class MainWindow(QMainWindow):
         settings_box = QGroupBox("Impostazioni")
         settings_layout = QFormLayout(settings_box)
 
+        ws_row = QHBoxLayout()
         self.wine_sandbox_path_edit = QLineEdit(self.settings["wine_sandbox_path"])
         self.wine_sandbox_path_edit.editingFinished.connect(self._save_settings_from_ui)
-        settings_layout.addRow("Percorso script wine-sandbox:", self.wine_sandbox_path_edit)
+        ws_row.addWidget(self.wine_sandbox_path_edit)
+        btn_browse_ws = QPushButton("Sfoglia...")
+        btn_browse_ws.clicked.connect(self._browse_wine_sandbox)
+        ws_row.addWidget(btn_browse_ws)
+        settings_layout.addRow("Percorso script wine-sandbox:", ws_row)
 
         prefix_row = QHBoxLayout()
         self.prefix_root_edit = QLineEdit(self.settings["prefix_root"])
@@ -955,6 +960,15 @@ class MainWindow(QMainWindow):
             self.settings.get("bchunk_output_dir", "") or self.settings["games_root"])
         if path:
             self.bchunk_output_edit.setText(path)
+            self._save_settings_from_ui()
+
+    def _browse_wine_sandbox(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Seleziona lo script wine-sandbox",
+            os.path.dirname(self.settings.get("wine_sandbox_path", "")) or str(Path.home()),
+            "Script shell (*.sh *.bash);;Tutti i file (*)")
+        if path:
+            self.wine_sandbox_path_edit.setText(path)
             self._save_settings_from_ui()
 
     def _browse_prefix_root(self):
