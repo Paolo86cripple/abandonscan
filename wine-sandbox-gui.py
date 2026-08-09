@@ -160,6 +160,37 @@ GAME_PROFILES = {
         "notes": "Usa Residual/ScummVM su sistemi moderni è spesso preferibile a Wine nativo.",
         "sources": ["PCGamingWiki"],
     },
+    "discworld noir": {
+        "display_name": "Discworld Noir (Perfect Entertainment, 1999)",
+        "winetricks": ["corefonts", "vcrun6", "quartz", "directmusic"],
+        "windows_version": "win98",
+        "dgvoodoo": False,
+        "cpu_limit_pct": None,
+        "notes": (
+            "Il gioco originale è incompatibile con XP e versioni successive nativamente "
+            "(problema noto anche su Windows reale). Cerca il 'Fix by Loma' (patch community "
+            "PCGamingWiki) da applicare nella cartella del gioco se crasha all'avvio. "
+            "Usa SafeDisc DRM: se hai la versione originale su CD potrebbe non partire senza "
+            "crack no-CD; le versioni re-release (GOG/Steam) sono DRM-free e non serve."
+        ),
+        "sources": ["PCGamingWiki"],
+    },
+    "mechwarrior 3": {
+        "display_name": "MechWarrior 3 (MicroProse, 1999)",
+        "winetricks": ["corefonts", "vcrun6", "directplay", "directshow", "l3codecx", "avifil32"],
+        "windows_version": "win98",
+        "dgvoodoo": True,
+        "cpu_limit_pct": None,
+        "notes": (
+            "WineHQ AppDB richiede esplicitamente un prefix a 32-bit in modalità "
+            "compatibilità Win95/Win98 (crea il prefix con architettura win32, non "
+            "WoW64/win64). Serve il CD originale montato o un'immagine ISO (usa la tab "
+            "Montaggio immagini). Applica la patch ufficiale 1.2 prima di giocare. "
+            "dgVoodoo2 consigliato per compatibilità DirectX 6.1/Glide e risoluzioni moderne "
+            "(vedi anche Hi-Res Patch + Widescreen Fix su PCGamingWiki per multi-monitor)."
+        ),
+        "sources": ["WineHQ AppDB", "PCGamingWiki"],
+    },
 }
 
 
