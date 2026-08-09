@@ -77,6 +77,7 @@ DEFAULT_SETTINGS = {
     "sec_allow_network": False,
     "sec_disable_zdrive": True,
     "sec_exe_rw": False,
+    "winecfg_ensure_zdrive": True,
     "sec_verify_integrity": True,
     "sec_resource_limits": False,
     "sec_memory_limit": "2G",
@@ -767,7 +768,37 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.btn_mount_mdf)
         layout.addLayout(btn_row)
 
-        layout.addWidget(QLabel("Immagini attualmente montate:"))
+        optical_box = QGroupBox("Dischi ottici fisici (lettore CD/DVD reale)")
+        optical_layout = QVBoxLayout(optical_box)
+        optical_info = QLabel(
+            "Rileva unità ottiche fisiche del sistema e i dischi eventualmente inseriti. "
+            "Un disco rilevato qui può essere montato con udisksctl come le immagini."
+        )
+        optical_info.setWordWrap(True)
+        optical_layout.addWidget(optical_info)
+
+        optical_btn_row = QHBoxLayout()
+        self.btn_scan_optical = QPushButton("🔄 Rileva dischi ottici")
+        self.btn_scan_optical.clicked.connect(self._on_scan_optical_clicked)
+        optical_btn_row.addWidget(self.btn_scan_optical)
+        optical_layout.addLayout(optical_btn_row)
+
+        self.optical_list = QListWidget()
+        self.optical_list.setMaximumHeight(100)
+        optical_layout.addWidget(self.optical_list)
+
+        optical_btn_row2 = QHBoxLayout()
+        self.btn_mount_optical = QPushButton("💿 Monta disco selezionato")
+        self.btn_mount_optical.clicked.connect(self._on_mount_optical_clicked)
+        self.btn_mount_optical.setEnabled(False)
+        optical_btn_row2.addWidget(self.btn_mount_optical)
+        optical_layout.addLayout(optical_btn_row2)
+        self.optical_list.itemSelectionChanged.connect(
+            lambda: self.btn_mount_optical.setEnabled(self.optical_list.currentItem() is not None))
+
+        layout.addWidget(optical_box)
+
+        layout.addWidget(QLabel("Immagini/dischi attualmente montati:"))
         self.mounted_list = QListWidget()
         layout.addWidget(self.mounted_list, stretch=1)
 
@@ -885,6 +916,14 @@ class MainWindow(QMainWindow):
         self.btn_open_regedit.clicked.connect(self._on_open_regedit)
         tools_btn_row.addWidget(self.btn_open_regedit)
         tools_layout.addLayout(tools_btn_row)
+
+        self.winecfg_ensure_zdrive_cb = QCheckBox(
+            "Ricrea automaticamente l'unità Z: (accesso alla radice del filesystem reale) "
+            "prima di aprire winecfg/regedit - necessario per accedere a file esterni "
+            "(es. installer su USB) mentre configuri il prefix")
+        self.winecfg_ensure_zdrive_cb.setChecked(True)
+        self.winecfg_ensure_zdrive_cb.stateChanged.connect(self._save_settings_from_ui)
+        tools_layout.addWidget(self.winecfg_ensure_zdrive_cb)
 
         scroll_layout.addWidget(tools_box)
 
@@ -1228,6 +1267,7 @@ class MainWindow(QMainWindow):
         self.settings["sec_allow_network"] = self.sec_allow_network.isChecked()
         self.settings["sec_disable_zdrive"] = self.sec_disable_zdrive.isChecked()
         self.settings["sec_exe_rw"] = self.sec_exe_rw.isChecked()
+        self.settings["winecfg_ensure_zdrive"] = self.winecfg_ensure_zdrive_cb.isChecked()
         self.settings["sec_verify_integrity"] = self.sec_verify_integrity.isChecked()
         self.settings["sec_resource_limits"] = self.sec_resource_limits.isChecked()
         self.settings["sec_memory_limit"] = self.sec_memory_limit_edit.text().strip() or "2G"
@@ -1248,6 +1288,7 @@ class MainWindow(QMainWindow):
         self.sec_allow_network.setChecked(self.settings.get("sec_allow_network", False))
         self.sec_disable_zdrive.setChecked(self.settings.get("sec_disable_zdrive", True))
         self.sec_exe_rw.setChecked(self.settings.get("sec_exe_rw", False))
+        self.winecfg_ensure_zdrive_cb.setChecked(self.settings.get("winecfg_ensure_zdrive", True))
         self.sec_verify_integrity.setChecked(self.settings.get("sec_verify_integrity", True))
         self.sec_resource_limits.setChecked(self.settings.get("sec_resource_limits", False))
         self.sec_memory_limit_edit.setText(self.settings.get("sec_memory_limit", "2G"))
@@ -1917,6 +1958,104 @@ class MainWindow(QMainWindow):
             item.setData(Qt.UserRole, entry)
             self.mounted_list.addItem(item)
 
+    def _on_scan_optical_clicked(self):
+        """Rileva unità ottiche fisiche (lettori CD/DVD) e verifica se
+        hanno un disco inserito, usando lsblk (dati dal kernel via sysfs,
+        nessun accesso diretto al device necessario per la sola rilevazione)."""
+        self.optical_list.clear()
+        if not shutil.which("lsblk"):
+            QMessageBox.critical(
+                self, "lsblk non trovato",
+                "Il comando 'lsblk' non è disponibile (fa parte di util-linux, "
+                "normalmente preinstallato).")
+            return
+
+        try:
+            result = subprocess.run(
+                ["lsblk", "-o", "NAME,TYPE,SIZE,LABEL,MOUNTPOINT", "-J", "-p"],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                self._log(f"lsblk fallito: {result.stderr.strip()}")
+                QMessageBox.critical(self, "Errore", "lsblk ha restituito un errore. Vedi il log.")
+                return
+
+            data = json.loads(result.stdout)
+            optical_devices = [d for d in data.get("blockdevices", []) if d.get("type") == "rom"]
+
+            if not optical_devices:
+                self._log("Nessuna unità ottica fisica rilevata sul sistema.")
+                self.optical_list.addItem("Nessuna unità ottica fisica rilevata")
+                return
+
+            for dev in optical_devices:
+                name = dev.get("name", "?")
+                size = dev.get("size") or "0B"
+                has_disc = size not in ("0B", "0", None, "")
+                label = dev.get("label") or ""
+                mountpoint = dev.get("mountpoint")
+
+                if has_disc:
+                    status = f"💿 Disco presente" + (f" ({label})" if label else "")
+                    if mountpoint:
+                        status += f" - già montato su {mountpoint}"
+                else:
+                    status = "⚪ Vuoto (nessun disco inserito)"
+
+                item_label = f"{name} — {status}"
+                item = QListWidgetItem(item_label)
+                item.setData(Qt.UserRole, {"device": name, "has_disc": has_disc, "mountpoint": mountpoint})
+                if not has_disc:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                self.optical_list.addItem(item)
+
+            self._log(f"Rilevate {len(optical_devices)} unità ottiche fisiche.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Errore", f"Errore durante il rilevamento: {e}")
+
+    def _on_mount_optical_clicked(self):
+        item = self.optical_list.currentItem()
+        if not item:
+            return
+        info = item.data(Qt.UserRole)
+        if not info or not info.get("has_disc"):
+            QMessageBox.information(self, "Nessun disco", "Questa unità non ha un disco inserito.")
+            return
+
+        device = info["device"]
+        if info.get("mountpoint"):
+            QMessageBox.information(self, "Già montato",
+                                     f"Il disco è già montato su:\n{info['mountpoint']}")
+            return
+
+        if not shutil.which("udisksctl"):
+            QMessageBox.critical(self, "udisksctl non trovato",
+                                  "Il comando 'udisksctl' non è disponibile.")
+            return
+
+        try:
+            mount_result = subprocess.run(
+                ["udisksctl", "mount", "-b", device],
+                capture_output=True, text=True, timeout=15
+            )
+            self._log(mount_result.stdout.strip())
+            if mount_result.returncode != 0:
+                self._log(mount_result.stderr.strip())
+                QMessageBox.critical(self, "Errore", "Impossibile montare il disco. Vedi il log.")
+                return
+
+            mount_match = re.search(r"at (.+)\.?$", mount_result.stdout.strip())
+            mount_point = mount_match.group(1).rstrip(".") if mount_match else "(sconosciuto)"
+
+            self.mounted_images.append({"device": device, "path": device, "mount_point": mount_point})
+            self._refresh_mounted_list()
+            self._log(f"Disco ottico montato su: {mount_point}")
+            self._on_scan_optical_clicked()  # aggiorna stato "già montato"
+
+        except Exception as e:
+            QMessageBox.critical(self, "Errore", f"Errore durante il montaggio: {e}")
+
     def _on_mount_iso_clicked(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Seleziona ISO/IMG/NRG da montare",
@@ -2073,11 +2212,14 @@ class MainWindow(QMainWindow):
             if unmount_result.returncode != 0:
                 self._log(unmount_result.stderr.strip())
 
-            delete_result = subprocess.run(
-                ["udisksctl", "loop-delete", "-b", device], capture_output=True, text=True)
-            self._log(delete_result.stdout.strip())
-            if delete_result.returncode != 0:
-                self._log(delete_result.stderr.strip())
+            # loop-delete si applica solo ai loop device (immagini file);
+            # i dischi ottici fisici (/dev/sr*) restano, si smonta solo il filesystem.
+            if "/loop" in device:
+                delete_result = subprocess.run(
+                    ["udisksctl", "loop-delete", "-b", device], capture_output=True, text=True)
+                self._log(delete_result.stdout.strip())
+                if delete_result.returncode != 0:
+                    self._log(delete_result.stderr.strip())
 
             self.mounted_images = [e for e in self.mounted_images if e["device"] != device]
             self._refresh_mounted_list()
@@ -2167,8 +2309,10 @@ class MainWindow(QMainWindow):
             # separato (non bloccano la finestra). Usiamo start() invece di
             # startDetached() per poter ricevere il segnale finished.
             # Ricreiamo Z: prima di avviare (wine-sandbox la rimuove per i
-            # giochi sandboxed, ma winecfg needs accesso ai file esterni).
-            self._ensure_z_drive(prefix_path)
+            # giochi sandboxed, ma winecfg needs accesso ai file esterni),
+            # solo se il toggle è attivo.
+            if self.winecfg_ensure_zdrive_cb.isChecked():
+                self._ensure_z_drive(prefix_path)
             if not hasattr(self, "_detached_procs"):
                 self._detached_procs = []
             proc = QProcess(self)
@@ -2346,7 +2490,8 @@ class MainWindow(QMainWindow):
         """Imposta la versione Windows scrivendo direttamente nel registry
         (winecfg /v non è affidabile su Wine 10+), poi wineboot -u per
         applicare. on_done(success: bool) viene chiamato al termine."""
-        self._ensure_z_drive(prefix_path)
+        if self.winecfg_ensure_zdrive_cb.isChecked():
+            self._ensure_z_drive(prefix_path)
 
         env = QProcessEnvironment.systemEnvironment()
         env.insert("WINEPREFIX", prefix_path)
@@ -2589,8 +2734,9 @@ class MainWindow(QMainWindow):
             try:
                 subprocess.run(["udisksctl", "unmount", "-b", device],
                                capture_output=True, text=True, timeout=10)
-                subprocess.run(["udisksctl", "loop-delete", "-b", device],
-                               capture_output=True, text=True, timeout=10)
+                if "/loop" in device:
+                    subprocess.run(["udisksctl", "loop-delete", "-b", device],
+                                   capture_output=True, text=True, timeout=10)
                 self._log(f"  Smontato: {entry.get('path', device)}")
             except Exception as e:
                 self._log(f"  ERRORE smontaggio {device}: {e}")
