@@ -68,6 +68,20 @@
 #   GPU via render node    Solo /dev/dri/renderD1XX esposto di default (non
 #                          card0): rendering/compute GPU senza CAP_SYS_ADMIN
 #
+# ESPOSIZIONE DI /sys (read-only, sempre attiva):
+#   --ro-bind /sys /sys   Wine/Mesa hanno bisogno di /sys per enumerare CPU
+#   (topology in /sys/devices/system/cpu) e GPU (bus PCI in /sys/devices/pci*,
+#   device DRM in /sys/class/drm, mappatura major:minor in /sys/dev/char).
+#   Senza /sys completo Wine fallisce la rilevazione della scheda e casca su
+#   llvmpipe (rendering software), il che rompe molti giochi 3D anche in
+#   modalità "GPU spenta" (il page fault del log è questo).
+#   Sicurezza: --ro-bind è read-only A LIVELLO DI MOUNT (nessuna scrittura
+#   possibile nemmeno con capability), il gioco gira come utente non-root con
+#   --cap-drop ALL, e l'esposizione è limitata a metadati hardware (comparable
+#   a /proc già montato). Stesso approccio di Steam/Flatpak per l'accelerazione
+#   GPU dentro i namespace. /sys/kernel/security (securityfs LSM) è mascherato
+#   con tmpfs vuota perché può contenere policy e stato degli LSM.
+#
 # Uso: ./scan-game.sh <url|link_mega|percorso_file_locale> [password_mega]
 
 set -euo pipefail
@@ -179,6 +193,11 @@ BWRAP_ARGS+=(
     --symlink /usr/bin /bin
     --proc /proc
     --dev /dev
+    # /sys intero in sola lettura (sempre): Wine/Mesa lo usano per enumerare
+    # CPU e GPU. Senza, Wine casca su llvmpipe e molti giochi 3D crashano
+    # (vedi commento nell'header). Read-only a livello di mount, sicuro.
+    --ro-bind /sys /sys
+    --tmpfs /sys/kernel/security
 )
 
 # Masking di file sensibili in /proc.
@@ -232,17 +251,8 @@ if [ "$ALLOW_DRI" -eq 1 ]; then
     fi
 fi
 
-# Mesa/Vulkan hanno bisogno di /sys per enumerare le GPU fisiche:
-# - /sys/class/drm: elenco dei device DRM (card0, renderD128, ecc.)
-# - /sys/dev/char: mappatura major:minor → device path (serve al loader)
-# Senza questi, il loader Mesa fallisce con "failed to retrieve device
-# information" e Vulkan con "init_physical_devices failed".
-if [ "$ALLOW_DRI" -eq 1 ]; then
-    BWRAP_ARGS+=(
-        --ro-bind-try /sys/class/drm /sys/class/drm
-        --ro-bind-try /sys/dev/char /sys/dev/char
-    )
-fi
+# NOTA: /sys (inclusi /sys/class/drm e /sys/dev/char per l'enumerazione GPU
+# Mesa/Vulkan) è già montato intero e read-only nella sezione base qui sopra.
 
 if [ "$HIDE_HOME" -eq 1 ]; then
     BWRAP_ARGS+=(--tmpfs /home --tmpfs /root)
