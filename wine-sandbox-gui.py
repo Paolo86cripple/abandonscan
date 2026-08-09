@@ -50,6 +50,7 @@ CONFIG_DIR = Path.home() / ".config" / "wine-sandbox-gui"
 GAMES_FILE = CONFIG_DIR / "games.json"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 PREFIXES_FILE = CONFIG_DIR / "prefixes.json"
+CUSTOM_PROFILES_FILE = CONFIG_DIR / "custom-game-profiles.json"
 
 DATA_DIR = Path.home() / ".local" / "share" / "wine-sandbox-gui"
 LAUNCH_HISTORY_FILE = DATA_DIR / "launch-history.log"
@@ -99,6 +100,96 @@ RUNTIME_WINETRICKS_VERBS = [
     "corefonts", "vcrun6", "vcrun2019", "dxvk", "d3dx9", "directmusic",
     "quartz", "gdiplus", "msxml3", "msxml6",
 ]
+
+# Database curato di profili di configurazione per titoli noti (abandonware
+# spesso presenti su Collection Chamber). Fonti: WineHQ AppDB, PCGamingWiki,
+# Lutris install scripts (dati raccolti manualmente, non via API live - le
+# API pubbliche di questi siti non sono adatte a query automatiche affidabili
+# per nome libero). Aggiorna/estendi questo dizionario quando trovi note utili.
+# Chiavi normalizzate: minuscolo, senza punteggiatura, spazi singoli.
+#
+# Campi per profilo:
+#   winetricks: lista di verbi winetricks consigliati
+#   windows_version: codice da WINDOWS_VERSIONS (es. "win98"), o None
+#   dgvoodoo: True se consigliato dgVoodoo2 invece di dxvk
+#   cpu_limit_pct: percentuale CPU consigliata (systemd-run), None se non serve
+#   notes: note testuali (bug noti, avvertenze)
+#   sources: lista di fonti consultate
+GAME_PROFILES = {
+    "shadow of destiny": {
+        "display_name": "Shadow of Destiny (Konami, 2002)",
+        "winetricks": ["corefonts", "vcrun6", "quartz", "directmusic"],
+        "windows_version": "winxp",
+        "dgvoodoo": True,
+        "cpu_limit_pct": 30,
+        "notes": (
+            "Bug noto: su CPU moderne il gioco gira a velocità doppia/tripla, "
+            "rompendo il timing dei puzzle. Limitare la CPU (~25-30%) aiuta a "
+            "renderlo giocabile. Usa DirectX 8; dgVoodoo2 più stabile di dxvk "
+            "per questo titolo. quartz/directmusic servono per FMV e colonna sonora."
+        ),
+        "sources": ["PCGamingWiki", "WineHQ AppDB"],
+    },
+    "diablo": {
+        "display_name": "Diablo (Blizzard, 1996)",
+        "winetricks": ["corefonts", "vcrun6"],
+        "windows_version": "win98",
+        "dgvoodoo": False,
+        "cpu_limit_pct": None,
+        "notes": "DirectDraw/software rendering, generalmente stabile con WineD3D nativo.",
+        "sources": ["WineHQ AppDB", "PCGamingWiki"],
+    },
+    "system shock 2": {
+        "display_name": "System Shock 2 (Looking Glass, 1999)",
+        "winetricks": ["corefonts", "vcrun6", "directmusic"],
+        "windows_version": "win98",
+        "dgvoodoo": True,
+        "cpu_limit_pct": None,
+        "notes": (
+            "Motore Dark Engine sensibile a versione Windows e refresh rate. "
+            "dgVoodoo2 consigliato per compatibilità Glide/D3D6-7."
+        ),
+        "sources": ["PCGamingWiki", "Lutris"],
+    },
+    "grim fandango": {
+        "display_name": "Grim Fandango (LucasArts, 1998)",
+        "winetricks": ["corefonts", "quartz"],
+        "windows_version": "win98",
+        "dgvoodoo": False,
+        "cpu_limit_pct": None,
+        "notes": "Usa Residual/ScummVM su sistemi moderni è spesso preferibile a Wine nativo.",
+        "sources": ["PCGamingWiki"],
+    },
+}
+
+
+def _normalize_game_name(name):
+    """Normalizza un nome gioco per il matching col database profili:
+    minuscolo, rimuove punteggiatura/edizioni comuni, spazi singoli."""
+    n = name.lower()
+    n = re.sub(r"[™®©]", "", n)
+    n = re.sub(r"\b(goty|game of the year|gold edition|deluxe edition|"
+               r"remastered|directors cut|director's cut|edition|complete)\b", "", n)
+    n = re.sub(r"[^a-z0-9\s]", " ", n)
+    n = re.sub(r"\s+", " ", n).strip()
+    return n
+
+
+def find_game_profile(name, custom_profiles=None):
+    """Cerca un profilo per nome: prima nei profili personalizzati
+    dell'utente (match esatto), poi nel database curato (match esatto
+    normalizzato, poi contenimento parziale).
+    Ritorna (chiave, profilo, is_custom) o (None, None, False)."""
+    normalized = _normalize_game_name(name)
+    custom_profiles = custom_profiles or {}
+    if normalized in custom_profiles:
+        return normalized, custom_profiles[normalized], True
+    if normalized in GAME_PROFILES:
+        return normalized, GAME_PROFILES[normalized], False
+    for key, profile in GAME_PROFILES.items():
+        if key in normalized or normalized in key:
+            return key, profile, False
+    return None, None, False
 
 CODEC_WINETRICKS_VERBS = [
     "allcodecs", "ffdshow", "xvid", "l3codecx", "cinepak", "dirac",
@@ -190,6 +281,7 @@ class MainWindow(QMainWindow):
         self.games = load_json(GAMES_FILE, [])
         self.settings = {**DEFAULT_SETTINGS, **load_json(SETTINGS_FILE, {})}
         self.prefixes = load_json(PREFIXES_FILE, [])
+        self.custom_profiles = load_json(CUSTOM_PROFILES_FILE, {})
         self.mounted_images = []  # [{device, path, mount_point}]
 
         self.process = None          # processo wine-sandbox (giochi/installer)
@@ -289,6 +381,10 @@ class MainWindow(QMainWindow):
         self.btn_open_game_prefix.clicked.connect(self._on_open_game_prefix_folder)
         btn_row_folders.addWidget(self.btn_open_game_prefix)
         left_layout.addLayout(btn_row_folders)
+
+        self.btn_suggest_config = QPushButton("💡 Suggerisci configurazione")
+        self.btn_suggest_config.clicked.connect(self._on_suggest_config_clicked)
+        left_layout.addWidget(self.btn_suggest_config)
 
         security_box = QGroupBox("Sicurezza sandbox (si applica a Gioca e Installa)")
         security_layout = QVBoxLayout(security_box)
@@ -1004,6 +1100,7 @@ class MainWindow(QMainWindow):
         has_selection = self.game_list.currentItem() is not None
         self.btn_play.setEnabled(has_selection)
         self.btn_remove.setEnabled(has_selection)
+        self.btn_suggest_config.setEnabled(has_selection)
 
     def _refresh_game_list(self):
         self.game_list.clear()
@@ -1232,6 +1329,199 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(game["prefix"]))
         else:
             QMessageBox.critical(self, "Errore", f"Prefix non trovato:\n{game['prefix']}")
+
+    def _on_suggest_config_clicked(self):
+        item = self.game_list.currentItem()
+        if not item:
+            return
+        game = item.data(Qt.UserRole)
+        game_name = game["name"]
+
+        key, profile, is_custom = find_game_profile(game_name, self.custom_profiles)
+
+        if not profile:
+            self._show_no_profile_dialog(game_name, game)
+            return
+
+        self._show_profile_dialog(game, key, profile, is_custom)
+
+    def _show_no_profile_dialog(self, game_name, game):
+        box = QMessageBox(self)
+        box.setWindowTitle("Nessun profilo trovato")
+        box.setTextFormat(Qt.RichText)
+        box.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        label = box.findChild(QLabel, "qt_msgbox_label")
+        if label:
+            label.setOpenExternalLinks(True)
+        box.setText(
+            f"Non ho un profilo di configurazione per '{game_name}' nel database locale.<br><br>"
+            "Puoi cercare informazioni su:<br>"
+            f"• <a href='https://www.pcgamingwiki.com/w/index.php?search={game_name.replace(' ', '+')}'>PCGamingWiki</a><br>"
+            f"• <a href='https://appdb.winehq.org/objectManager.php?sClass=application&"
+            f"iId=&bIsMaintainer=&sTitle={game_name.replace(' ', '+')}'>WineHQ AppDB</a><br>"
+            f"• <a href='https://lutris.net/games?q={game_name.replace(' ', '+')}'>Lutris</a><br><br>"
+            "Dopo aver configurato il gioco manualmente (winetricks, versione Windows), "
+            "puoi salvare un profilo personalizzato per riusarlo in futuro."
+        )
+        box.setStandardButtons(QMessageBox.Ok)
+        save_btn = box.addButton("Salva profilo personalizzato...", QMessageBox.ActionRole)
+        box.exec()
+        if box.clickedButton() == save_btn:
+            self._save_custom_profile_dialog(game)
+
+    def _show_profile_dialog(self, game, key, profile, is_custom):
+        source_label = "Profilo personalizzato" if is_custom else "Database curato (" + ", ".join(profile.get("sources", [])) + ")"
+        display_name = profile.get("display_name", game["name"])
+
+        details = f"<b>{display_name}</b><br><i>{source_label}</i><br><br>"
+        details += f"<b>Winetricks:</b> {', '.join(profile.get('winetricks', [])) or 'nessuno'}<br>"
+        wv = profile.get("windows_version")
+        wv_label = next((label for label, code in WINDOWS_VERSIONS if code == wv), wv) if wv else "predefinita"
+        details += f"<b>Versione Windows:</b> {wv_label}<br>"
+        details += f"<b>dgVoodoo2 consigliato:</b> {'sì' if profile.get('dgvoodoo') else 'no'}<br>"
+        cpu = profile.get("cpu_limit_pct")
+        details += f"<b>Limite CPU consigliato:</b> {f'{cpu}%' if cpu else 'nessuno'}<br>"
+        if profile.get("notes"):
+            details += f"<br><b>Note:</b> {profile['notes']}<br>"
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Configurazione suggerita")
+        box.setTextFormat(Qt.RichText)
+        box.setText(details)
+        apply_btn = box.addButton("Applica al prefix", QMessageBox.AcceptRole)
+        box.addButton("Chiudi", QMessageBox.RejectRole)
+        box.exec()
+
+        if box.clickedButton() == apply_btn:
+            self._apply_game_profile(game, profile)
+
+    def _apply_game_profile(self, game, profile):
+        prefix_path = game["prefix"]
+        if not os.path.isdir(prefix_path):
+            QMessageBox.critical(self, "Errore", f"Il prefix non esiste più:\n{prefix_path}")
+            return
+
+        arch = ""
+        prefix_entry = next((p for p in self.prefixes if p["path"] == prefix_path), None)
+        if prefix_entry:
+            arch = prefix_entry.get("arch", "")
+
+        if self.wine_tool_process is not None and self.wine_tool_process.state() != QProcess.NotRunning:
+            QMessageBox.warning(self, "Operazione in corso",
+                                 "C'è già un'operazione sul prefix in esecuzione. Attendi che finisca.")
+            return
+
+        steps = []
+
+        version_code = profile.get("windows_version")
+        if version_code:
+            steps.append(("version", version_code))
+
+        verbs = profile.get("winetricks", [])
+        if verbs:
+            steps.append(("winetricks", verbs))
+
+        cpu = profile.get("cpu_limit_pct")
+        if cpu:
+            self.sec_resource_limits.setChecked(True)
+            self.sec_cpu_limit_edit.setText(str(cpu))
+            self._save_settings_from_ui()
+
+        if not steps:
+            QMessageBox.information(self, "Niente da applicare",
+                                     "Il profilo non specifica winetricks o versione Windows da applicare.")
+            return
+
+        self._wine_log(f"\n=== Applico profilo suggerito per '{game['name']}' ===")
+
+        def run_next():
+            if not steps:
+                self._wine_log("=== Profilo applicato completamente ===\n")
+                if profile.get("dgvoodoo"):
+                    QMessageBox.information(
+                        self, "dgVoodoo2 consigliato",
+                        "Questo profilo consiglia dgVoodoo2. Usa il pulsante dedicato nella "
+                        "tab Prefix Wine per scaricarlo e installarlo nella cartella del gioco.")
+                return
+            kind, payload = steps.pop(0)
+            if kind == "version":
+                self._wine_log(f"Imposto versione Windows: {payload}")
+                self._apply_windows_version(prefix_path, arch, payload,
+                                            on_done=lambda ok: run_next())
+            elif kind == "winetricks":
+                self._wine_log(f"Installo winetricks: {', '.join(payload)}")
+                self._run_winetricks_setup(prefix_path, payload, on_done=lambda: run_next())
+
+        run_next()
+
+    def _run_winetricks_setup(self, prefix_path, verbs, on_done=None):
+        setup_args = ["--setup", prefix_path] + verbs
+        ws_program, ws_args = self._wine_sandbox_launch_cmd(setup_args)
+        self._wine_log(f"$ {ws_program} {' '.join(ws_args)}")
+
+        self.wine_tool_process = QProcess(self)
+        self.wine_tool_process.setProcessChannelMode(QProcess.MergedChannels)
+        self.wine_tool_process.readyReadStandardOutput.connect(self._on_wine_tool_output)
+        self.wine_tool_process.errorOccurred.connect(
+            lambda err: self._wine_log(
+                f"\n[ERRORE QProcess: {self.wine_tool_process.errorString()}]\n"))
+
+        def finished(code, status):
+            self._wine_log(f"\n[winetricks terminato con codice {code}]\n")
+            if on_done:
+                on_done()
+
+        self.wine_tool_process.finished.connect(finished)
+        self.wine_tool_process.start(ws_program, ws_args)
+
+    def _save_custom_profile_dialog(self, game):
+        verbs_text, ok = QInputDialog.getText(
+            self, "Profilo personalizzato - Winetricks",
+            "Verbi winetricks separati da spazio (lascia vuoto se nessuno):")
+        if not ok:
+            return
+        verbs = verbs_text.split() if verbs_text.strip() else []
+
+        version_labels = ["(nessuna - non cambiare)"] + [label for label, _ in WINDOWS_VERSIONS]
+        version_label, ok = QInputDialog.getItem(
+            self, "Profilo personalizzato - Versione Windows",
+            "Versione Windows consigliata per questo gioco:", version_labels, 0, False)
+        if not ok:
+            return
+        version_code = None
+        if version_label != "(nessuna - non cambiare)":
+            version_code = next(code for label, code in WINDOWS_VERSIONS if label == version_label)
+
+        cpu_text, ok = QInputDialog.getText(
+            self, "Profilo personalizzato - Limite CPU",
+            "Percentuale CPU consigliata (vuoto se nessun limite, es. 30):")
+        if not ok:
+            return
+        cpu_limit = None
+        if cpu_text.strip():
+            try:
+                cpu_limit = int(cpu_text.strip())
+            except ValueError:
+                cpu_limit = None
+
+        notes, ok = QInputDialog.getMultiLineText(
+            self, "Profilo personalizzato - Note", "Note aggiuntive (opzionale):")
+        if not ok:
+            notes = ""
+
+        key = _normalize_game_name(game["name"])
+        self.custom_profiles[key] = {
+            "display_name": game["name"],
+            "winetricks": verbs,
+            "windows_version": version_code,
+            "dgvoodoo": False,
+            "cpu_limit_pct": cpu_limit,
+            "notes": notes.strip(),
+            "sources": ["Profilo utente"],
+        }
+        save_json(CUSTOM_PROFILES_FILE, self.custom_profiles)
+        QMessageBox.information(self, "Profilo salvato",
+                                 f"Profilo personalizzato salvato per '{game['name']}'.")
 
     def _on_add_existing_clicked(self):
         prefix = self._choose_prefix_path("Prefix del gioco")
