@@ -1431,6 +1431,18 @@ class MainWindow(QMainWindow):
             except OSError as e:
                 self._wine_log(f"ATTENZIONE: impossibile rimuovere Z: {e}")
 
+    def _ensure_z_drive(self, prefix_path):
+        """Ricrea il symlink Z: -> / se mancante. Necessario per winecfg/regedit
+        che girano fuori sandbox e devono accedere a file esterni (es. installer
+        su disco USB). wine-sandbox rimuoverà Z: prima dell'esecuzione sandboxed."""
+        z_link = os.path.join(prefix_path, "dosdevices", "z:")
+        if not os.path.lexists(z_link):
+            try:
+                os.symlink("/", z_link)
+                self._wine_log("Unità Z: ricreata per winecfg/regedit (accesso ai file esterni).")
+            except OSError as e:
+                self._wine_log(f"ATTENZIONE: impossibile ricreare Z: {e}")
+
     def _run_wine_tool(self, prefix_path, arch, program, args, blocking_log=True, detached=False):
         """Esegue un tool Wine (winecfg/wineboot/regedit) con WINEPREFIX (e
         WINEARCH solo se esplicitamente richiesto) impostati, DIRETTAMENTE
@@ -1443,8 +1455,10 @@ class MainWindow(QMainWindow):
         if detached:
             # winecfg/regedit sono GUI interattive: lanciale su un QProcess
             # separato (non bloccano la finestra). Usiamo start() invece di
-            # startDetached() per poter ricevere il segnale finished e pulire
-            # il symlink Z: che Wine ricrea a ogni wineboot.
+            # startDetached() per poter ricevere il segnale finished.
+            # Ricreiamo Z: prima di avviare (wine-sandbox la rimuove per i
+            # giochi sandboxed, ma winecfg needs accesso ai file esterni).
+            self._ensure_z_drive(prefix_path)
             if not hasattr(self, "_detached_procs"):
                 self._detached_procs = []
             proc = QProcess(self)
@@ -1453,9 +1467,6 @@ class MainWindow(QMainWindow):
             proc.readyReadStandardOutput.connect(self._on_wine_tool_output)
             proc.errorOccurred.connect(
                 lambda err: self._wine_log(f"\n[ERRORE avvio {program}: {proc.errorString()}]\n"))
-            if self.sec_disable_zdrive.isChecked():
-                proc.finished.connect(
-                    lambda code, status: self._remove_z_drive(prefix_path))
             proc.finished.connect(
                 lambda code, status: self._wine_log(f"\n[{program} terminato con codice {code}]\n"))
             proc.finished.connect(lambda code, status: self._detached_procs.remove(proc))
@@ -1541,9 +1552,7 @@ class MainWindow(QMainWindow):
                 save_json(PREFIXES_FILE, self.prefixes)
                 self._refresh_prefix_list()
                 self._wine_log("Prefix creato e registrato con successo.")
-
-                if self.sec_disable_zdrive.isChecked():
-                    self._remove_z_drive(prefix_path)
+                # Z: è già rimossa da wine-sandbox --init, niente da fare qui
             else:
                 self._wine_log(
                     f"ATTENZIONE: wineboot ha restituito codice {exit_code}. "

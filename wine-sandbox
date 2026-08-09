@@ -185,6 +185,13 @@ COMMON_ENV=(
     XDG_RUNTIME_DIR="/run/user/$(id -u)"
     PULSE_SERVER="unix:$PULSE_SOCKET"
 )
+# XAUTHORITY: necessario per connettersi al server X (XWayland). Senza questo,
+# Wine non può aprire finestre e fallisce con "Authorization required".
+if [ -n "${XAUTHORITY:-}" ]; then
+    COMMON_ENV+=(XAUTHORITY="$XAUTHORITY")
+    # Assicuriamoci che il file xauth sia visibile dentro la sandbox
+    [ -f "$XAUTHORITY" ] && BWRAP_ARGS+=(--ro-bind-try "$XAUTHORITY" "$XAUTHORITY")
+fi
 # WINEARCH viene impostato SOLO in modalità --init: è l'unico momento in cui
 # conta (creazione del prefix). Su un prefix già esistente, wine legge
 # l'architettura registrata al suo interno. Forzarlo ad ogni esecuzione
