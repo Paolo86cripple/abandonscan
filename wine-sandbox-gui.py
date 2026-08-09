@@ -1217,6 +1217,18 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
+        # Le sezioni superiori vivono in una scroll area: la tab ha troppo
+        # contenuto per stare in un layout verticale piatto (le group box
+        # verrebbero schiacciate). Il log resta sotto, fisso, col suo stretch.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        scroll.setWidget(container)
+        scroll.setMinimumHeight(200)
+        layout.addWidget(scroll, stretch=1)
+
         deps_box = QGroupBox("Dipendenze di sistema")
         deps_layout = QVBoxLayout(deps_box)
 
@@ -1227,7 +1239,7 @@ class MainWindow(QMainWindow):
         self.btn_check_deps.clicked.connect(self._on_check_dependencies)
         deps_layout.addWidget(self.btn_check_deps)
 
-        layout.addWidget(deps_box)
+        container_layout.addWidget(deps_box)
 
         launcher_box = QGroupBox("Integrazione desktop")
         launcher_layout = QVBoxLayout(launcher_box)
@@ -1250,7 +1262,7 @@ class MainWindow(QMainWindow):
         self.btn_create_launcher.setEnabled(False)
         launcher_layout.addWidget(self.btn_create_launcher)
 
-        layout.addWidget(launcher_box)
+        container_layout.addWidget(launcher_box)
 
         backup_box = QGroupBox("Backup prefix")
         backup_layout = QVBoxLayout(backup_box)
@@ -1265,7 +1277,7 @@ class MainWindow(QMainWindow):
         self.btn_backup_prefix.clicked.connect(self._on_backup_prefix)
         backup_layout.addWidget(self.btn_backup_prefix)
 
-        layout.addWidget(backup_box)
+        container_layout.addWidget(backup_box)
 
         config_box = QGroupBox("Backup/ripristino configurazione GUI")
         config_layout = QVBoxLayout(config_box)
@@ -1286,7 +1298,7 @@ class MainWindow(QMainWindow):
         config_btn_row.addWidget(self.btn_import_config)
         config_layout.addLayout(config_btn_row)
 
-        layout.addWidget(config_box)
+        container_layout.addWidget(config_box)
 
         scan_box = QGroupBox("Scansione malware (a piacimento, non obbligatoria)")
         scan_layout = QVBoxLayout(scan_box)
@@ -1342,7 +1354,7 @@ class MainWindow(QMainWindow):
         self.btn_scan_file.clicked.connect(self._on_scan_file_clicked)
         scan_layout.addWidget(self.btn_scan_file)
 
-        layout.addWidget(scan_box)
+        container_layout.addWidget(scan_box)
 
         layout.addWidget(QLabel("Log operazioni di sistema:"))
         self.system_log = QPlainTextEdit()
