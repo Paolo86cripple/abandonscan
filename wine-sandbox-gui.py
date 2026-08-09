@@ -42,7 +42,8 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QPushButton, QLabel, QLineEdit,
     QPlainTextEdit, QFileDialog, QMessageBox, QInputDialog, QSplitter,
-    QGroupBox, QFormLayout, QTabWidget, QComboBox, QCheckBox, QGridLayout
+    QGroupBox, QFormLayout, QTabWidget, QComboBox, QCheckBox, QGridLayout,
+    QScrollArea
 )
 
 CONFIG_DIR = Path.home() / ".config" / "wine-sandbox-gui"
@@ -469,6 +470,14 @@ class MainWindow(QMainWindow):
         # --- Colonna destra: gestione del prefix selezionato ---
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Sezione strumenti scorrevole (version, tools, winetricks, dgvoodoo)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
 
         version_box = QGroupBox("Versione Windows")
         version_layout = QHBoxLayout(version_box)
@@ -480,7 +489,7 @@ class MainWindow(QMainWindow):
         self.btn_apply_version = QPushButton("Applica")
         self.btn_apply_version.clicked.connect(self._on_apply_windows_version)
         version_layout.addWidget(self.btn_apply_version)
-        right_layout.addWidget(version_box)
+        scroll_layout.addWidget(version_box)
 
         tools_box = QGroupBox("Strumenti Wine")
         tools_layout = QVBoxLayout(tools_box)
@@ -505,7 +514,7 @@ class MainWindow(QMainWindow):
         tools_btn_row.addWidget(self.btn_open_regedit)
         tools_layout.addLayout(tools_btn_row)
 
-        right_layout.addWidget(tools_box)
+        scroll_layout.addWidget(tools_box)
 
         winetricks_box = QGroupBox(
             "Installa dipendenze (winetricks - ATTENZIONE: rete abilitata per il download)")
@@ -537,7 +546,7 @@ class MainWindow(QMainWindow):
         self.btn_install_deps.clicked.connect(self._on_install_dependencies)
         winetricks_layout.addWidget(self.btn_install_deps)
 
-        right_layout.addWidget(winetricks_box)
+        scroll_layout.addWidget(winetricks_box)
 
         dgvoodoo_box = QGroupBox("Compatibilità grafica legacy (DirectX 1-9 / Glide)")
         dgvoodoo_layout = QVBoxLayout(dgvoodoo_box)
@@ -553,13 +562,19 @@ class MainWindow(QMainWindow):
         self.btn_download_dgvoodoo.clicked.connect(self._on_download_dgvoodoo)
         dgvoodoo_layout.addWidget(self.btn_download_dgvoodoo)
 
-        right_layout.addWidget(dgvoodoo_box)
+        scroll_layout.addWidget(dgvoodoo_box)
+        scroll_layout.addStretch()
 
+        scroll.setWidget(scroll_content)
+        right_layout.addWidget(scroll, stretch=1)
+
+        # Log fisso in fondo, sempre visibile
         right_layout.addWidget(QLabel("Log strumenti Wine:"))
         self.wine_tool_log = QPlainTextEdit()
         self.wine_tool_log.setReadOnly(True)
         self.wine_tool_log.setStyleSheet("font-family: monospace; font-size: 10pt;")
-        right_layout.addWidget(self.wine_tool_log, stretch=1)
+        self.wine_tool_log.setMaximumHeight(160)
+        right_layout.addWidget(self.wine_tool_log)
 
         splitter.addWidget(right_widget)
         splitter.setSizes([320, 730])
@@ -932,6 +947,14 @@ class MainWindow(QMainWindow):
     def _wine_sandbox_path(self):
         return self.settings.get("wine_sandbox_path") or "wine-sandbox"
 
+    def _wine_sandbox_launch_cmd(self, sandbox_args):
+        """Ritorna (program, args) per lanciare wine-sandbox.
+        Se lo script non ha il bit di esecuzione, lo wrapping con bash."""
+        wine_sandbox = self._wine_sandbox_path()
+        if os.path.isfile(wine_sandbox) and not os.access(wine_sandbox, os.X_OK):
+            return "bash", [wine_sandbox] + sandbox_args
+        return wine_sandbox, sandbox_args
+
     # ---- Log persistente delle esecuzioni (audit trail) ----
     def _log_launch_history(self, prefix, exe, toggles):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -1029,14 +1052,14 @@ class MainWindow(QMainWindow):
                                  "C'è già un'operazione in esecuzione. Attendi che finisca.")
             return
 
-        wine_sandbox = self._wine_sandbox_path()
+        wine_program, wine_args = self._wine_sandbox_launch_cmd(args)
         prefix_path = args[0] if args else None
         exe_path = args[1] if len(args) > 1 else None
 
         env = self._sandbox_env()
         env_dict = {key: env.value(key) for key in env.keys() if key.startswith("SANDBOX_")}
 
-        program, full_args = self._build_launch_argv(wine_sandbox, args, env_dict)
+        program, full_args = self._build_launch_argv(wine_program, wine_args, env_dict)
 
         self._log(f"\n$ {program} {' '.join(full_args)}\n")
 
@@ -1478,8 +1501,10 @@ class MainWindow(QMainWindow):
         if arch:
             init_args.append(arch)
 
+        ws_program, ws_args = self._wine_sandbox_launch_cmd(init_args)
+
         self._wine_log(f"Creazione prefix in: {prefix_path} (architettura {arch or 'WoW64'})")
-        self._wine_log(f"$ {wine_sandbox} {' '.join(init_args)}")
+        self._wine_log(f"$ {ws_program} {' '.join(ws_args)}")
 
         if self.wine_tool_process is not None and self.wine_tool_process.state() != QProcess.NotRunning:
             QMessageBox.warning(self, "Operazione in corso",
@@ -1526,7 +1551,7 @@ class MainWindow(QMainWindow):
         self.wine_tool_process.finished.connect(lambda code, status: after_boot(code))
         self.wine_tool_process.finished.connect(
             lambda code, status: self._wine_log(f"\n[terminato con codice {code}]\n"))
-        self.wine_tool_process.start(wine_sandbox, init_args)
+        self.wine_tool_process.start(ws_program, ws_args)
 
     def _on_add_existing_prefix_clicked(self):
         path = QFileDialog.getExistingDirectory(
@@ -1608,9 +1633,9 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
 
-        wine_sandbox = self._wine_sandbox_path()
-        args = ["--setup", entry["path"]] + verbs
-        self._wine_log(f"\n$ {wine_sandbox} {' '.join(args)}\n")
+        setup_args = ["--setup", entry["path"]] + verbs
+        ws_program, ws_args = self._wine_sandbox_launch_cmd(setup_args)
+        self._wine_log(f"\n$ {ws_program} {' '.join(ws_args)}\n")
 
         if self.wine_tool_process is not None and self.wine_tool_process.state() != QProcess.NotRunning:
             QMessageBox.warning(self, "Operazione in corso", "Attendi che l'operazione corrente finisca.")
@@ -1624,7 +1649,7 @@ class MainWindow(QMainWindow):
                 f"\n[ERRORE QProcess: {self.wine_tool_process.errorString()}]\n"))
         self.wine_tool_process.finished.connect(
             lambda code, status: self._wine_log(f"\n[winetricks terminato con codice {code}]\n"))
-        self.wine_tool_process.start(wine_sandbox, args)
+        self.wine_tool_process.start(ws_program, ws_args)
 
     # ------------------------------------------------------------------
     # dgVoodoo2 (download automatico dall'ultima release GitHub)
