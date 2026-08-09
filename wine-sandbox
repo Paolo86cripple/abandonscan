@@ -26,11 +26,20 @@
 #   SANDBOX_HIDE_HOME=0        Non nascondere la home (di default nascosta)
 #   SANDBOX_CAP_DROP=0         Non droppare le capability Linux (di default droppate)
 #   SANDBOX_UNSHARE_PID=0      Non isolare la visibilità dei processi (di default isolata)
-#   SANDBOX_UNSHARE_IPC=1      Isola i segmenti IPC condivisi (SysV shm/sem/msg) dal resto
-#                              del sistema. ⚠️ DISATTIVATO di default: rompe X11 MIT-SHM
-#                              (X_ShmPutImage) usato da moltissimi giochi, che crashano con
-#                              "Unhandled page fault". Attiva solo per giochi che non usano
-#                              MIT-SHM e di cui ti fidi ciecamente.
+#   SANDBOX_WAYLAND_ONLY=1     Espone SOLO Wayland, mai X11 (DI DEFAULT ON). X11 è il
+#                              vettore di sicurezza peggiore (un qualsiasi client X11 può
+#                              intercettare tastiera/screenshot di tutte le finestre,
+#                              sandbox o no): escluderlo elimina questa classe di attacchi.
+#                              Richiede Wine >= 10 con driver nativo Wayland
+#                              (winewayland.drv) e una sessione Wayland attiva
+#                              (WAYLAND_DISPLAY). Alcuni giochi legacy potrebbero non essere
+#                              supportati dal driver nativo: in quel caso usa
+#                              SANDBOX_WAYLAND_ONLY=0 (X11/XWayland).
+#   SANDBOX_UNSHARE_IPC=0      Disattiva l'isolamento dei segmenti IPC condivisi
+#                              (SysV shm/sem/msg). ATTIVO di default: con il driver nativo
+#                              Wayland non c'è X11/MIT-SHM, quindi non rompe nulla. Serve
+#                              solo in modalità X11 (SANDBOX_WAYLAND_ONLY=0), dove isolare
+#                              i segmenti SysV fa crashare i giochi che usano MIT-SHM.
 #   SANDBOX_DRI=0              Non passare /dev/dri, niente accelerazione GPU (di default passato)
 #   SANDBOX_GPU_CAP_SYSADMIN=1 Espone /dev/dri/cardN intero (invece del solo
 #                              render node) e aggiunge CAP_SYS_ADMIN, necessario
@@ -146,7 +155,16 @@ fi
 HIDE_HOME="${SANDBOX_HIDE_HOME:-1}"
 CAP_DROP="${SANDBOX_CAP_DROP:-1}"
 UNSHARE_PID="${SANDBOX_UNSHARE_PID:-1}"
-UNSHARE_IPC="${SANDBOX_UNSHARE_IPC:-0}"
+WAYLAND_ONLY="${SANDBOX_WAYLAND_ONLY:-1}"
+# --unshare-ipc in modo Wayland-only: con il driver nativo Wayland (winewayland.drv)
+# non esiste più X11/MIT-SHM (il rendering va via EGL/Vulkan al compositor), quindi
+# isolare i segmenti SysV è sicuro e viene abilitato di default. Disattivalo con
+# SANDBOX_UNSHARE_IPC=0 se un gioco dovesse usare memoria condivisa SysV esterna.
+if [ "$WAYLAND_ONLY" -eq 1 ] && [ -z "${SANDBOX_UNSHARE_IPC:-}" ]; then
+    UNSHARE_IPC=1
+else
+    UNSHARE_IPC="${SANDBOX_UNSHARE_IPC:-0}"
+fi
 ALLOW_DRI="${SANDBOX_DRI:-1}"
 GPU_CAP_SYSADMIN="${SANDBOX_GPU_CAP_SYSADMIN:-0}"
 ALLOW_AUDIO="${SANDBOX_AUDIO:-1}"
@@ -170,13 +188,13 @@ BWRAP_ARGS+=(
     --new-session
 )
 
-# --unshare-ipc è DISATTIVATO di default: crea un namespace IPC separato, il che
-# spezza la memoria condivisa X11 MIT-SHM (X_ShmPutImage) usata da moltissimi giochi
-# via Wine per il trasferimento veloce dei frame. Con --unshare-ipc il server X
-# (che vive nel namespace dell'host) non vede i segmenti SysV del gioco → il gioco
-# riceve BadValue e crasha con "Unhandled page fault". Abilitalo (SANDBOX_UNSHARE_IPC=1)
-# solo per giochi che non usano X11 MIT-SHM e di cui ti fidi ciecamente: isola i
-# segmenti IPC condivisi dal resto del sistema, ma rompe molti titoli.
+# --unshare-ipc: isola i segmenti IPC condivisi (SysV shm/sem/msg) dal resto del
+# sistema. Disattivo SOLO in modalità X11, perché spezza la memoria condivisa X11
+# MIT-SHM (X_ShmPutImage) usata da moltissimi giochi: il server X (nell'host) non
+# vede i segmenti SysV del gioco → BadValue/crash "Unhandled page fault". Con
+# SANDBOX_WAYLAND_ONLY=1 (default) il rendering non passa più da X11, quindi
+# --unshare-ipc è attivo. Forza SANDBOX_UNSHARE_IPC=0 se un gioco usa memoria
+# condivisa SysV esterna.
 [ "$UNSHARE_IPC" -eq 1 ] && BWRAP_ARGS+=(--unshare-ipc)
 
 [ "$UNSHARE_PID" -eq 1 ] && BWRAP_ARGS+=(--unshare-pid)
@@ -293,7 +311,21 @@ fi
 if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "/run/user/$(id -u)/${WAYLAND_DISPLAY}" ]; then
     BWRAP_ARGS+=(--bind "/run/user/$(id -u)/${WAYLAND_DISPLAY}" "/run/user/$(id -u)/${WAYLAND_DISPLAY}")
 fi
-if [ -n "${DISPLAY:-}" ] && [ -d /tmp/.X11-unix ]; then
+# In modalità Wayland-puro (SANDBOX_WAYLAND_ONLY=1) NON esponiamo il socket X11
+# e non passiamo XAUTHORITY: il gioco può connettersi solo al compositor Wayland.
+# X11 è il vettore di sicurezza peggiore (qualunque client X11 può intercettare
+# tastiera/screenshot di tutte le finestre): escluderlo elimina questa classe di
+# attacchi. Compromesso: serve Wine >= 10 con driver nativo Wayland (winewayland.drv),
+# e alcuni giochi legacy potrebbero non essere ancora supportati dal driver nativo.
+if [ "$WAYLAND_ONLY" -eq 1 ]; then
+    if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "/run/user/$(id -u)/${WAYLAND_DISPLAY}" ]; then
+        echo "   Display: SOLO Wayland (X11 non esposto)"
+    else
+        echo "ERRORE: SANDBOX_WAYLAND_ONLY=1 ma il socket Wayland non è disponibile." >&2
+        echo "       Sessione Wayland richiesta (WAYLAND_DISPLAY non impostato)." >&2
+        exit 1
+    fi
+elif [ -n "${DISPLAY:-}" ] && [ -d /tmp/.X11-unix ]; then
     BWRAP_ARGS+=(--ro-bind /tmp/.X11-unix /tmp/.X11-unix)
 fi
 
@@ -359,6 +391,13 @@ elif [ "$INIT_MODE" -eq 1 ]; then
     [ -n "$WINEARCH_VAL" ] && echo "   Architettura: $WINEARCH_VAL" || echo "   Architettura: WoW64 (predefinita)"
 fi
 
+# In modalità Wayland-puro: DISPLAY viene svuotato (definito prima di COMMON_ENV)
+# per forzare Wine a scegliere il driver nativo Wayland (winewayland.drv) invece del
+# driver X11. winex11.drv viene disabilitato sotto, dopo la definizione di COMMON_ENV.
+if [ "$WAYLAND_ONLY" -eq 1 ]; then
+    DISPLAY=""
+fi
+
 COMMON_ENV=(
     env
     WINEPREFIX="$WINEPFX"
@@ -367,9 +406,20 @@ COMMON_ENV=(
     XDG_RUNTIME_DIR="/run/user/$(id -u)"
     PULSE_SERVER="unix:$PULSE_SOCKET"
 )
+
+# In modalità Wayland-puro: disabilitiamo esplicitamente winex11.drv così il gioco
+# non può mai cadere su X11 nemmeno come fallback.
+if [ "$WAYLAND_ONLY" -eq 1 ]; then
+    if [ -n "${WINEDLLOVERRIDES:-}" ]; then
+        COMMON_ENV+=(WINEDLLOVERRIDES="winex11.drv=d;${WINEDLLOVERRIDES}")
+    else
+        COMMON_ENV+=(WINEDLLOVERRIDES="winex11.drv=d")
+    fi
+fi
 # XAUTHORITY: necessario per connettersi al server X (XWayland). Senza questo,
 # Wine non può aprire finestre e fallisce con "Authorization required".
-if [ -n "${XAUTHORITY:-}" ]; then
+# In modalità Wayland-puro non serve (e non vogliamo esporre il file).
+if [ "$WAYLAND_ONLY" -eq 0 ] && [ -n "${XAUTHORITY:-}" ]; then
     COMMON_ENV+=(XAUTHORITY="$XAUTHORITY")
     # Assicuriamoci che il file xauth sia visibile dentro la sandbox
     [ -f "$XAUTHORITY" ] && BWRAP_ARGS+=(--ro-bind-try "$XAUTHORITY" "$XAUTHORITY")

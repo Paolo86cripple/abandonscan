@@ -76,6 +76,7 @@ DEFAULT_SETTINGS = {
     "sec_cap_drop": True,
     "sec_unshare_pid": True,
     "sec_unshare_ipc": False,
+    "sec_wayland_only": True,
     "sec_dri": True,
     "sec_gpu_cap_sysadmin": False,
     "sec_audio": True,
@@ -729,6 +730,7 @@ class MainWindow(QMainWindow):
 
         self.games = load_json(GAMES_FILE, [])
         self.settings = {**DEFAULT_SETTINGS, **load_json(SETTINGS_FILE, {})}
+        self._raw_settings = load_json(SETTINGS_FILE, {})
         self.prefixes = load_json(PREFIXES_FILE, [])
         self.custom_profiles = load_json(CUSTOM_PROFILES_FILE, {})
         self.mounted_images = []  # [{device, path, mount_point}]
@@ -860,12 +862,18 @@ class MainWindow(QMainWindow):
         security_layout.addWidget(self.sec_unshare_pid)
 
         self.sec_unshare_ipc = QCheckBox(
-            "  ⚠️ Isola anche i segmenti IPC condivisi (ROMpe X11 MIT-SHM usato da "
-            "molti giochi, che crashano - lascia DISATTIVATO a meno che un gioco non "
-            "lo richieda esplicitamente)")
-        self.sec_unshare_ipc.setChecked(False)
+            "  Isola i segmenti IPC condivisi (attivo di default col driver Wayland; "
+            "rompe solo X11 MIT-SHM, quindi va disattivato se passi a X11)")
+        self.sec_unshare_ipc.setChecked(True)
         self.sec_unshare_ipc.stateChanged.connect(self._save_settings_from_ui)
         security_layout.addWidget(self.sec_unshare_ipc)
+
+        self.sec_wayland_only = QCheckBox(
+            "  🟢 Solo Wayland, MAI X11 (molto più sicuro - richiede Wine ≥ 10 col driver "
+            "nativo Wayland e sessione Wayland; alcuni giochi legacy non compatibili)")
+        self.sec_wayland_only.setChecked(True)
+        self.sec_wayland_only.stateChanged.connect(self._on_wayland_toggle_changed)
+        security_layout.addWidget(self.sec_wayland_only)
 
         self.sec_dri = QCheckBox("Consenti GPU/accelerazione 3D (serve per la maggior parte dei giochi)")
         self.sec_dri.setChecked(True)
@@ -1596,7 +1604,7 @@ class MainWindow(QMainWindow):
             self.games = load_json(GAMES_FILE, [])
             self.prefixes = load_json(PREFIXES_FILE, [])
             self.settings = {**DEFAULT_SETTINGS, **load_json(SETTINGS_FILE, {})}
-
+            self._raw_settings = load_json(SETTINGS_FILE, {})
             self._refresh_game_list()
             self._refresh_prefix_list()
             self.wine_sandbox_path_edit.setText(self.settings["wine_sandbox_path"])
@@ -1621,6 +1629,7 @@ class MainWindow(QMainWindow):
         self.settings["sec_cap_drop"] = self.sec_cap_drop.isChecked()
         self.settings["sec_unshare_pid"] = self.sec_unshare_pid.isChecked()
         self.settings["sec_unshare_ipc"] = self.sec_unshare_ipc.isChecked()
+        self.settings["sec_wayland_only"] = self.sec_wayland_only.isChecked()
         self.settings["sec_dri"] = self.sec_dri.isChecked()
         self.settings["sec_gpu_cap_sysadmin"] = self.sec_gpu_cap_sysadmin.isChecked()
         self.settings["sec_audio"] = self.sec_audio.isChecked()
@@ -1641,13 +1650,21 @@ class MainWindow(QMainWindow):
         self.settings["enable_desktop_launcher_creation"] = self.enable_launcher_creation_checkbox.isChecked()
         self.settings["unmount_on_exit"] = self.unmount_on_exit_cb.isChecked()
         self.settings["bchunk_output_dir"] = self.bchunk_output_edit.text().strip()
+        self._raw_settings = dict(self.settings)
         save_json(SETTINGS_FILE, self.settings)
 
     def _load_security_settings_into_ui(self):
         self.sec_hide_home.setChecked(self.settings.get("sec_hide_home", True))
         self.sec_cap_drop.setChecked(self.settings.get("sec_cap_drop", True))
         self.sec_unshare_pid.setChecked(self.settings.get("sec_unshare_pid", True))
-        self.sec_unshare_ipc.setChecked(self.settings.get("sec_unshare_ipc", False))
+        self.sec_wayland_only.setChecked(self.settings.get("sec_wayland_only", True))
+        # sec_unshare_ipc eredita lo stato di wayland_only se l'utente non l'ha mai
+        # salvato esplicitamente: con il driver nativo Wayland non c'è X11/MIT-SHM,
+        # quindi l'isolamento IPC è sicuro e viene abilitato di default.
+        if "sec_unshare_ipc" not in self._raw_settings:
+            self.sec_unshare_ipc.setChecked(self.sec_wayland_only.isChecked())
+        else:
+            self.sec_unshare_ipc.setChecked(self.settings.get("sec_unshare_ipc", False))
         self.sec_dri.setChecked(self.settings.get("sec_dri", True))
         self.sec_gpu_cap_sysadmin.setChecked(self.settings.get("sec_gpu_cap_sysadmin", False))
         self.sec_audio.setChecked(self.settings.get("sec_audio", True))
@@ -1668,6 +1685,33 @@ class MainWindow(QMainWindow):
         self.enable_launcher_creation_checkbox.setChecked(
             self.settings.get("enable_desktop_launcher_creation", False))
         self._update_launcher_button_state()
+
+    def _on_wayland_toggle_changed(self):
+        if self.sec_wayland_only.isChecked():
+            reply = QMessageBox.warning(
+                self, "Passare solo a Wayland?",
+                "In modalità 'solo Wayland' la sandbox NON espone più X11: il gioco "
+                "potrà connettersi esclusivamente al compositor Wayland.\n\n"
+                "Vantaggi: X11 è il vettore di sicurezza peggiore (un qualsiasi client "
+                "X11 può intercettare tastiera/screenshot di tutte le finestre): "
+                "escluderlo elimina questa classe di attacchi.\n\n"
+                "Requisiti: Wine ≥ 10 con driver nativo Wayland (winewayland.drv) e "
+                "sessione Wayland attiva. Alcuni giochi legacy potrebbero non partire.\n\n"
+                "Confermi?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                self.sec_wayland_only.blockSignals(True)
+                self.sec_wayland_only.setChecked(False)
+                self.sec_wayland_only.blockSignals(False)
+                return
+        # Se l'utente non ha mai forzato sec_unshare_ipc, lo fa seguire a wayland:
+        # attivo col driver Wayland (sicuro, niente X11 MIT-SHM), disattivo in X11.
+        if "sec_unshare_ipc" not in self._raw_settings:
+            self.sec_unshare_ipc.blockSignals(True)
+            self.sec_unshare_ipc.setChecked(self.sec_wayland_only.isChecked())
+            self.sec_unshare_ipc.blockSignals(False)
+        self._save_settings_from_ui()
 
     def _on_network_toggle_changed(self):
         if self.sec_allow_network.isChecked():
@@ -1698,6 +1742,7 @@ class MainWindow(QMainWindow):
         env.insert("SANDBOX_CAP_DROP", _val("SANDBOX_CAP_DROP", self.sec_cap_drop))
         env.insert("SANDBOX_UNSHARE_PID", _val("SANDBOX_UNSHARE_PID", self.sec_unshare_pid))
         env.insert("SANDBOX_UNSHARE_IPC", _val("SANDBOX_UNSHARE_IPC", self.sec_unshare_ipc))
+        env.insert("SANDBOX_WAYLAND_ONLY", _val("SANDBOX_WAYLAND_ONLY", self.sec_wayland_only))
         env.insert("SANDBOX_DRI", _val("SANDBOX_DRI", self.sec_dri))
         env.insert("SANDBOX_GPU_CAP_SYSADMIN", _val("SANDBOX_GPU_CAP_SYSADMIN", self.sec_gpu_cap_sysadmin))
         env.insert("SANDBOX_AUDIO", _val("SANDBOX_AUDIO", self.sec_audio))
@@ -1790,6 +1835,7 @@ class MainWindow(QMainWindow):
             "cap_drop": self.sec_cap_drop.isChecked(),
             "unshare_pid": self.sec_unshare_pid.isChecked(),
             "unshare_ipc": self.sec_unshare_ipc.isChecked(),
+            "wayland_only": self.sec_wayland_only.isChecked(),
             "dri": self.sec_dri.isChecked(),
             "gpu_cap_sysadmin": self.sec_gpu_cap_sysadmin.isChecked(),
             "audio": self.sec_audio.isChecked(),
