@@ -107,6 +107,7 @@ HIDE_HOME="${SANDBOX_HIDE_HOME:-1}"
 CAP_DROP="${SANDBOX_CAP_DROP:-1}"
 UNSHARE_PID="${SANDBOX_UNSHARE_PID:-1}"
 ALLOW_DRI="${SANDBOX_DRI:-1}"
+GPU_CAP_SYSADMIN="${SANDBOX_GPU_CAP_SYSADMIN:-0}"
 ALLOW_AUDIO="${SANDBOX_AUDIO:-1}"
 ALLOW_LOOPBACK="${SANDBOX_ALLOW_LOOPBACK:-0}"
 ALLOW_NETWORK="${SANDBOX_ALLOW_NETWORK:-0}"
@@ -130,9 +131,9 @@ BWRAP_ARGS+=(
 
 [ "$UNSHARE_PID" -eq 1 ] && BWRAP_ARGS+=(--unshare-pid)
 if [ "$CAP_DROP" -eq 1 ]; then
-    if [ "$ALLOW_DRI" -eq 1 ]; then
-        # Con GPU attiva, droppa tutto tranne CAP_SYS_ADMIN: serve per
-        # l'autenticazione DRM (amdgpu/radeon richiedono drmAuth).
+    if [ "$ALLOW_DRI" -eq 1 ] && [ "$GPU_CAP_SYSADMIN" -eq 1 ]; then
+        # Con GPU attiva e toggle esplicito, droppa tutto tranne CAP_SYS_ADMIN:
+        # serve per l'autenticazione DRM (amdgpu/radeon richiedono drmAuth).
         BWRAP_ARGS+=(--cap-drop ALL --cap-add CAP_SYS_ADMIN)
     else
         BWRAP_ARGS+=(--cap-drop ALL)

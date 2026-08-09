@@ -66,6 +66,7 @@ DEFAULT_SETTINGS = {
     "sec_cap_drop": True,
     "sec_unshare_pid": True,
     "sec_dri": True,
+    "sec_gpu_cap_sysadmin": False,
     "sec_audio": True,
     "sec_loopback": False,
     "sec_allow_network": False,
@@ -311,6 +312,13 @@ class MainWindow(QMainWindow):
         self.sec_dri.setChecked(True)
         self.sec_dri.stateChanged.connect(self._save_settings_from_ui)
         security_layout.addWidget(self.sec_dri)
+
+        self.sec_gpu_cap_sysadmin = QCheckBox(
+            "  ⚠️ Consenti CAP_SYS_ADMIN per GPU (necessario per driver amdgpu/radeon, "
+            "riduce la sicurezza - attiva solo se i giochi non partono)")
+        self.sec_gpu_cap_sysadmin.setChecked(False)
+        self.sec_gpu_cap_sysadmin.stateChanged.connect(self._save_settings_from_ui)
+        security_layout.addWidget(self.sec_gpu_cap_sysadmin)
 
         self.sec_audio = QCheckBox("Consenti audio")
         self.sec_audio.setChecked(True)
@@ -886,6 +894,7 @@ class MainWindow(QMainWindow):
         self.settings["sec_cap_drop"] = self.sec_cap_drop.isChecked()
         self.settings["sec_unshare_pid"] = self.sec_unshare_pid.isChecked()
         self.settings["sec_dri"] = self.sec_dri.isChecked()
+        self.settings["sec_gpu_cap_sysadmin"] = self.sec_gpu_cap_sysadmin.isChecked()
         self.settings["sec_audio"] = self.sec_audio.isChecked()
         self.settings["sec_loopback"] = self.sec_loopback.isChecked()
         self.settings["sec_allow_network"] = self.sec_allow_network.isChecked()
@@ -905,6 +914,7 @@ class MainWindow(QMainWindow):
         self.sec_cap_drop.setChecked(self.settings.get("sec_cap_drop", True))
         self.sec_unshare_pid.setChecked(self.settings.get("sec_unshare_pid", True))
         self.sec_dri.setChecked(self.settings.get("sec_dri", True))
+        self.sec_gpu_cap_sysadmin.setChecked(self.settings.get("sec_gpu_cap_sysadmin", False))
         self.sec_audio.setChecked(self.settings.get("sec_audio", True))
         self.sec_loopback.setChecked(self.settings.get("sec_loopback", False))
         self.sec_allow_network.setChecked(self.settings.get("sec_allow_network", False))
@@ -947,6 +957,7 @@ class MainWindow(QMainWindow):
         env.insert("SANDBOX_CAP_DROP", _val("SANDBOX_CAP_DROP", self.sec_cap_drop))
         env.insert("SANDBOX_UNSHARE_PID", _val("SANDBOX_UNSHARE_PID", self.sec_unshare_pid))
         env.insert("SANDBOX_DRI", _val("SANDBOX_DRI", self.sec_dri))
+        env.insert("SANDBOX_GPU_CAP_SYSADMIN", _val("SANDBOX_GPU_CAP_SYSADMIN", self.sec_gpu_cap_sysadmin))
         env.insert("SANDBOX_AUDIO", _val("SANDBOX_AUDIO", self.sec_audio))
         env.insert("SANDBOX_ALLOW_LOOPBACK", _val("SANDBOX_ALLOW_LOOPBACK", self.sec_loopback))
         env.insert("SANDBOX_ALLOW_NETWORK", _val("SANDBOX_ALLOW_NETWORK", self.sec_allow_network))
@@ -1036,6 +1047,7 @@ class MainWindow(QMainWindow):
             "cap_drop": self.sec_cap_drop.isChecked(),
             "unshare_pid": self.sec_unshare_pid.isChecked(),
             "dri": self.sec_dri.isChecked(),
+            "gpu_cap_sysadmin": self.sec_gpu_cap_sysadmin.isChecked(),
             "audio": self.sec_audio.isChecked(),
             "loopback": self.sec_loopback.isChecked(),
             "allow_network": self.sec_allow_network.isChecked(),
