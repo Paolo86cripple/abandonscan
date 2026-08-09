@@ -35,6 +35,8 @@ import subprocess
 import urllib.request
 import urllib.parse
 import urllib.error
+import html
+from html.parser import HTMLParser
 from pathlib import Path
 from datetime import datetime
 
@@ -45,7 +47,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QPushButton, QLabel, QLineEdit,
     QPlainTextEdit, QFileDialog, QMessageBox, QInputDialog, QSplitter,
     QGroupBox, QFormLayout, QTabWidget, QComboBox, QCheckBox, QGridLayout,
-    QScrollArea
+    QScrollArea, QDialog
 )
 
 CONFIG_DIR = Path.home() / ".config" / "wine-sandbox-gui"
@@ -196,6 +198,58 @@ GAME_PROFILES = {
 }
 
 
+class _HTMLTextExtractor(HTMLParser):
+    """Estrae testo leggibile da HTML grezzo, saltando script/style/nav
+    e inserendo newline dopo blocchi comuni, per rendere leggibili pagine
+    come PCGamingWiki/WineHQ AppDB senza dipendenze esterne (no bs4)."""
+    BLOCK_TAGS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "table"}
+    SKIP_TAGS = {"script", "style", "nav", "header", "footer", "noscript"}
+
+    def __init__(self):
+        super().__init__()
+        self._skip_depth = 0
+        self.chunks = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP_TAGS:
+            self._skip_depth += 1
+        elif tag in self.BLOCK_TAGS:
+            self.chunks.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP_TAGS and self._skip_depth > 0:
+            self._skip_depth -= 1
+        elif tag in self.BLOCK_TAGS:
+            self.chunks.append("\n")
+
+    def handle_data(self, data):
+        if self._skip_depth == 0:
+            text = data.strip()
+            if text:
+                self.chunks.append(text + " ")
+
+    def get_text(self):
+        text = html.unescape("".join(self.chunks))
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n\s*\n+", "\n\n", text)
+        return text.strip()
+
+
+def fetch_url_as_text(url, timeout=15, max_chars=20000):
+    """Scarica una URL e ne estrae il testo leggibile (rimuovendo tag HTML).
+    Usato per far leggere all'utente pagine come PCGamingWiki/WineHQ AppDB
+    dentro l'app, senza parsing strutturato (troppo fragile per prosa libera)."""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (wine-sandbox-gui)"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode(errors="replace")
+    parser = _HTMLTextExtractor()
+    parser.feed(raw)
+    text = parser.get_text()
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n\n[... testo troncato ...]"
+    return text
+
+
 def _normalize_game_name(name):
     """Normalizza un nome gioco per il matching col database profili:
     minuscolo, rimuove punteggiatura/edizioni comuni, spazi singoli."""
@@ -307,6 +361,30 @@ class DgVoodooDownloadThread(QThread):
 
 LUTRIS_API_SEARCH = "https://lutris.net/api/games?search="
 LUTRIS_API_GAME = "https://lutris.net/api/games/"
+
+
+class PageFetchThread(QThread):
+    """Scarica una pagina web e ne estrae il testo leggibile, in background
+    per non bloccare la UI. Usato per consultare PCGamingWiki/WineHQ AppDB/ecc.
+    dentro l'app quando l'utente fornisce un link durante la creazione di un
+    profilo personalizzato."""
+    finished_ok = Signal(str)
+    finished_error = Signal(str)
+
+    def __init__(self, url):
+        super().__init__()
+        self.url = url
+
+    def run(self):
+        try:
+            text = fetch_url_as_text(self.url)
+            self.finished_ok.emit(text or "(nessun testo estraibile da questa pagina)")
+        except Exception as e:
+            self.finished_error.emit(
+                f"Errore nello scaricare/leggere la pagina: {e}\n\n"
+                "Alcuni siti (es. WineHQ AppDB) bloccano il download automatico con "
+                "protezioni anti-bot: usa il pulsante 'Apri nel browser' in quel caso."
+            )
 
 
 class LutrisLookupThread(QThread):
@@ -1666,7 +1744,50 @@ class MainWindow(QMainWindow):
         self.wine_tool_process.finished.connect(finished)
         self.wine_tool_process.start(ws_program, ws_args)
 
+    def _show_reference_page(self, url):
+        """Scarica una pagina (PCGamingWiki/WineHQ AppDB/ecc.) e ne mostra il
+        testo estratto in una finestra non modale, così l'utente può
+        consultarla mentre compila i campi del profilo personalizzato."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Contenuto pagina: {url}")
+        dialog.resize(800, 600)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(f"<a href='{url}'>{url}</a> (apri nel browser per link/immagini)"))
+        text_view = QPlainTextEdit()
+        text_view.setReadOnly(True)
+        text_view.setPlainText("Caricamento in corso...")
+        layout.addWidget(text_view, stretch=1)
+
+        open_browser_btn = QPushButton("Apri nel browser")
+        open_browser_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(url)))
+        layout.addWidget(open_browser_btn)
+
+        dialog.setModal(False)
+        dialog.show()
+
+        # Manteniamo un riferimento al thread e alla dialog sull'istanza
+        # principale, altrimenti verrebbero garbage-collected appena la
+        # funzione ritorna (dialog non modale + thread asincrono).
+        if not hasattr(self, "_page_fetch_threads"):
+            self._page_fetch_threads = []
+        thread = PageFetchThread(url)
+        thread.finished_ok.connect(text_view.setPlainText)
+        thread.finished_error.connect(text_view.setPlainText)
+        thread.finished.connect(lambda: self._page_fetch_threads.remove(thread))
+        self._page_fetch_threads.append(thread)
+        thread.start()
+
     def _save_custom_profile_dialog(self, game):
+        link, ok = QInputDialog.getText(
+            self, "Profilo personalizzato - Link di riferimento (opzionale)",
+            "Incolla un link a PCGamingWiki, WineHQ AppDB, Lutris, ecc. per consultarne il "
+            "contenuto qui dentro prima di compilare i campi (lascia vuoto per saltare):")
+        if not ok:
+            return
+        link = link.strip()
+        if link:
+            self._show_reference_page(link)
+
         verbs_text, ok = QInputDialog.getText(
             self, "Profilo personalizzato - Winetricks",
             "Verbi winetricks separati da spazio (lascia vuoto se nessuno):")
