@@ -1625,6 +1625,16 @@ class MainWindow(QMainWindow):
             return
         arch = "" if arch_choice.startswith("Predefinito") else "win64"
 
+        version_labels = [label for label, _ in WINDOWS_VERSIONS]
+        default_idx = version_labels.index("Windows 10") if "Windows 10" in version_labels else 0
+        version_label, ok = QInputDialog.getItem(
+            self, "Versione Windows",
+            "Versione Windows da impostare nel prefix (applicata subito dopo la creazione):",
+            version_labels, default_idx, False)
+        if not ok:
+            return
+        version_code = next(code for label, code in WINDOWS_VERSIONS if label == version_label)
+
         prefix_path = os.path.join(parent_dir, safe_name)
         if os.path.exists(prefix_path) and os.listdir(prefix_path):
             QMessageBox.critical(self, "Errore", f"La cartella esiste già e non è vuota:\n{prefix_path}")
@@ -1660,6 +1670,15 @@ class MainWindow(QMainWindow):
                 self._refresh_prefix_list()
                 self._wine_log("Prefix creato e registrato con successo.")
                 # Z: è già rimossa da wine-sandbox --init, niente da fare qui
+
+                self._wine_log(f"Imposto versione Windows '{version_label}' ({version_code})...")
+
+                def after_version(success):
+                    if not success:
+                        self._wine_log("ATTENZIONE: impostazione versione Windows fallita "
+                                       "(il prefix resta comunque utilizzabile con la versione predefinita).")
+
+                self._apply_windows_version(prefix_path, arch, version_code, on_done=after_version)
             else:
                 self._wine_log(
                     f"ATTENZIONE: wineboot ha restituito codice {exit_code}. "
@@ -1720,26 +1739,10 @@ class MainWindow(QMainWindow):
             save_json(PREFIXES_FILE, self.prefixes)
             self._refresh_prefix_list()
 
-    def _on_apply_windows_version(self):
-        entry = self._selected_prefix()
-        if not entry:
-            return
-        version_label = self.windows_version_combo.currentText()
-        version_code = next(code for label, code in WINDOWS_VERSIONS if label == version_label)
-
-        self._wine_log(f"Imposto versione Windows '{version_label}' ({version_code}) su {entry['path']}")
-
-        # winecfg /v non imposta affidabilmente la versione in Wine 10+.
-        # Scriviamo direttamente nel registry con reg add, poi wineboot -u
-        # per applicare i cambiamenti.
-        prefix_path = entry["path"]
-        arch = entry.get("arch", "")
-
-        if self.wine_tool_process is not None and self.wine_tool_process.state() != QProcess.NotRunning:
-            QMessageBox.warning(self, "Operazione in corso",
-                                 "C'è già un'operazione sul prefix in esecuzione. Attendi che finisca.")
-            return
-
+    def _apply_windows_version(self, prefix_path, arch, version_code, on_done=None):
+        """Imposta la versione Windows scrivendo direttamente nel registry
+        (winecfg /v non è affidabile su Wine 10+), poi wineboot -u per
+        applicare. on_done(success: bool) viene chiamato al termine."""
         self._ensure_z_drive(prefix_path)
 
         env = QProcessEnvironment.systemEnvironment()
@@ -1747,10 +1750,10 @@ class MainWindow(QMainWindow):
         if arch:
             env.insert("WINEARCH", arch)
 
-        reg_cmd = ["wine", "reg", "add", "HKCU\\Software\\Wine",
+        reg_cmd = ["reg", "add", "HKCU\\Software\\Wine",
                    "/v", "Version", "/t", "REG_SZ", "/d", version_code, "/f"]
 
-        self._wine_log(f"$ {' '.join(reg_cmd)}")
+        self._wine_log(f"$ wine {' '.join(reg_cmd)}")
         self.wine_tool_process = QProcess(self)
         self.wine_tool_process.setProcessEnvironment(env)
         self.wine_tool_process.setProcessChannelMode(QProcess.MergedChannels)
@@ -1770,20 +1773,43 @@ class MainWindow(QMainWindow):
                 self.wine_tool_process.errorOccurred.connect(
                     lambda err: self._wine_log(
                         f"\n[ERRORE QProcess: {self.wine_tool_process.errorString()}]\n"))
-                self.wine_tool_process.finished.connect(
-                    lambda code, st: self._wine_log(
+
+                def after_boot_reg(code, st):
+                    ok = (code == 0)
+                    self._wine_log(
                         f"\n[wineboot terminato con codice {code}]\n"
-                        + ("Versione Windows applicata con successo." if code == 0 else
-                           "ATTENZIONE: wineboot ha restituito un errore.")))
+                        + ("Versione Windows applicata con successo." if ok else
+                           "ATTENZIONE: wineboot ha restituito un errore."))
+                    if on_done:
+                        on_done(ok)
+
+                self.wine_tool_process.finished.connect(after_boot_reg)
                 self.wine_tool_process.start("wineboot", ["-u"])
             else:
                 self._wine_log(f"ERRORE: reg add ha fallito (codice {exit_code}).")
+                if on_done:
+                    on_done(False)
 
         self.wine_tool_process.errorOccurred.connect(
             lambda err: self._wine_log(
                 f"\n[ERRORE QProcess: {self.wine_tool_process.errorString()}]\n"))
         self.wine_tool_process.finished.connect(after_reg)
-        self.wine_tool_process.start("wine", reg_cmd[1:])
+        self.wine_tool_process.start("wine", reg_cmd)
+
+    def _on_apply_windows_version(self):
+        entry = self._selected_prefix()
+        if not entry:
+            return
+        version_label = self.windows_version_combo.currentText()
+        version_code = next(code for label, code in WINDOWS_VERSIONS if label == version_label)
+
+        if self.wine_tool_process is not None and self.wine_tool_process.state() != QProcess.NotRunning:
+            QMessageBox.warning(self, "Operazione in corso",
+                                 "C'è già un'operazione sul prefix in esecuzione. Attendi che finisca.")
+            return
+
+        self._wine_log(f"Imposto versione Windows '{version_label}' ({version_code}) su {entry['path']}")
+        self._apply_windows_version(entry["path"], entry.get("arch", ""), version_code)
 
     def _on_open_winecfg(self):
         entry = self._selected_prefix()
