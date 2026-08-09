@@ -1371,6 +1371,15 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(f"{status}  —  {tool}: {description}{location}")
             self.deps_status_list.addItem(item)
 
+        clamav_path = shutil.which("clamscan")
+        if clamav_path:
+            item = QListWidgetItem(f"✅ trovato ({clamav_path})  —  clamscan: scansione malware locale (opzionale)")
+        else:
+            item = QListWidgetItem(
+                "⚪ opzionale (non installato)  —  clamscan: scansione malware locale. "
+                "Su CachyOS/Arch: sudo pacman -S clamav && sudo freshclam")
+        self.deps_status_list.addItem(item)
+
         missing = [tool for tool, _ in REQUIRED_TOOLS if not shutil.which(tool)]
         if missing:
             self._system_log(
