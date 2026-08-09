@@ -33,6 +33,8 @@ import shutil
 import tempfile
 import subprocess
 import urllib.request
+import urllib.parse
+import urllib.error
 from pathlib import Path
 from datetime import datetime
 
@@ -303,6 +305,125 @@ class DgVoodooDownloadThread(QThread):
             self.finished_error.emit(f"Errore durante il download di dgVoodoo2: {e}")
 
 
+LUTRIS_API_SEARCH = "https://lutris.net/api/games?search="
+LUTRIS_API_GAME = "https://lutris.net/api/games/"
+
+
+class LutrisLookupThread(QThread):
+    """Cerca un gioco sull'API pubblica di Lutris ed estrae informazioni
+    utili (verbi winetricks, versione Windows, note) dagli install script
+    strutturati. Query on-demand, solo quando l'utente lo richiede
+    esplicitamente (nessuna chiamata automatica in background)."""
+    log = Signal(str)
+    finished_ok = Signal(dict)   # profilo estratto
+    finished_error = Signal(str)
+
+    def __init__(self, game_name):
+        super().__init__()
+        self.game_name = game_name
+
+    def run(self):
+        try:
+            query = urllib.parse.quote(self.game_name)
+            search_url = LUTRIS_API_SEARCH + query
+            self.log.emit(f"Cerco su Lutris: {search_url}")
+            req = urllib.request.Request(search_url, headers={"User-Agent": "wine-sandbox-gui"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode())
+
+            results = data.get("results", [])
+            # Preferisci risultati per piattaforma Windows e match di nome più stretto
+            windows_results = [
+                r for r in results
+                if any(p.get("name") == "Windows" for p in r.get("platforms", []))
+            ]
+            candidates = windows_results or results
+            if not candidates:
+                self.finished_error.emit(f"Nessun risultato su Lutris per '{self.game_name}'.")
+                return
+
+            normalized_query = _normalize_game_name(self.game_name)
+            best = None
+            for r in candidates:
+                if _normalize_game_name(r.get("name", "")) == normalized_query:
+                    best = r
+                    break
+            if not best:
+                best = candidates[0]
+
+            slug = best["slug"]
+            self.log.emit(f"Trovato: {best['name']} ({best.get('year', '?')}) - slug: {slug}")
+
+            detail_url = LUTRIS_API_GAME + slug
+            req2 = urllib.request.Request(detail_url, headers={"User-Agent": "wine-sandbox-gui"})
+            with urllib.request.urlopen(req2, timeout=15) as resp2:
+                detail = json.loads(resp2.read().decode())
+
+            installers = detail.get("installers", [])
+            wine_installers = [i for i in installers if i.get("runner") == "wine"]
+            chosen = wine_installers[0] if wine_installers else (installers[0] if installers else None)
+
+            if not chosen:
+                self.finished_error.emit(
+                    f"'{best['name']}' trovato su Lutris ma senza install script disponibili.")
+                return
+
+            profile = self._extract_profile(best, chosen)
+            self.finished_ok.emit(profile)
+
+        except urllib.error.URLError as e:
+            self.finished_error.emit(f"Errore di rete contattando Lutris: {e}")
+        except Exception as e:
+            self.finished_error.emit(f"Errore durante la ricerca su Lutris: {e}")
+
+    @staticmethod
+    def _extract_profile(game_info, installer):
+        """Estrae verbi winetricks, indizi sulla versione Windows e note
+        dallo script installer Lutris (formato JSON strutturato)."""
+        script = installer.get("script", {}) or {}
+        steps = script.get("installer", []) or []
+
+        winetricks_verbs = []
+        for step in steps:
+            task = step.get("task") if isinstance(step, dict) else None
+            if isinstance(task, dict) and task.get("name") == "winetricks":
+                app = task.get("app", "")
+                winetricks_verbs.extend(app.split())
+
+        # Indizio versione Windows: cerca "win98"/"winxp"/ecc. nei file referenziati
+        # (es. reg_file con nome tipo "win98.reg") o nelle note testuali.
+        text_blob = json.dumps(script).lower() + " " + (installer.get("notes") or "").lower()
+        windows_version = None
+        for label, code in WINDOWS_VERSIONS:
+            if code in text_blob or label.lower() in text_blob:
+                windows_version = code
+                break
+
+        dgvoodoo = "dgvoodoo" in text_blob
+
+        notes_parts = []
+        if installer.get("notes"):
+            notes_parts.append(installer["notes"].strip())
+        if installer.get("description"):
+            notes_parts.append(installer["description"].strip())
+        notes_parts.append(
+            f"Estratto automaticamente dall'install script Lutris '{installer.get('slug', '')}' "
+            f"(runner: {installer.get('runner', '?')}, versione: {installer.get('version', '?')}). "
+            "Verifica manualmente prima di applicare: gli script Lutris spesso includono anche "
+            "download di file di gioco/patch che questa GUI non gestisce automaticamente."
+        )
+
+        return {
+            "display_name": f"{game_info.get('name', '')} ({game_info.get('year', '?')})",
+            "winetricks": sorted(set(winetricks_verbs)),
+            "windows_version": windows_version,
+            "dgvoodoo": dgvoodoo,
+            "cpu_limit_pct": None,
+            "notes": "\n\n".join(notes_parts),
+            "sources": [f"Lutris (install script '{installer.get('slug', '')}')"],
+        }
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -318,6 +439,7 @@ class MainWindow(QMainWindow):
         self.process = None          # processo wine-sandbox (giochi/installer)
         self.wine_tool_process = None  # processo per winecfg/wineboot/winetricks diretti
         self.dgvoodoo_thread = None
+        self.lutris_thread = None
         self.winetricks_checkboxes = {}
 
         self._build_ui()
@@ -1386,7 +1508,8 @@ class MainWindow(QMainWindow):
             label.setOpenExternalLinks(True)
         box.setText(
             f"Non ho un profilo di configurazione per '{game_name}' nel database locale.<br><br>"
-            "Puoi cercare informazioni su:<br>"
+            "Posso cercare automaticamente sull'API pubblica di Lutris (richiede connessione "
+            "a lutris.net solo per questa ricerca), oppure puoi cercare manualmente su:<br>"
             f"• <a href='https://www.pcgamingwiki.com/w/index.php?search={game_name.replace(' ', '+')}'>PCGamingWiki</a><br>"
             f"• <a href='https://appdb.winehq.org/objectManager.php?sClass=application&"
             f"iId=&bIsMaintainer=&sTitle={game_name.replace(' ', '+')}'>WineHQ AppDB</a><br>"
@@ -1395,12 +1518,39 @@ class MainWindow(QMainWindow):
             "puoi salvare un profilo personalizzato per riusarlo in futuro."
         )
         box.setStandardButtons(QMessageBox.Ok)
+        lutris_btn = box.addButton("🔍 Cerca automaticamente su Lutris", QMessageBox.ActionRole)
         save_btn = box.addButton("Salva profilo personalizzato...", QMessageBox.ActionRole)
         box.exec()
-        if box.clickedButton() == save_btn:
+        if box.clickedButton() == lutris_btn:
+            self._lookup_lutris(game_name, game)
+        elif box.clickedButton() == save_btn:
             self._save_custom_profile_dialog(game)
 
-    def _show_profile_dialog(self, game, key, profile, is_custom):
+    def _lookup_lutris(self, game_name, game):
+        if self.lutris_thread is not None and self.lutris_thread.isRunning():
+            QMessageBox.warning(self, "Ricerca in corso", "Attendi che la ricerca corrente finisca.")
+            return
+
+        self._wine_log(f"\nCerco '{game_name}' su Lutris...")
+        self.lutris_thread = LutrisLookupThread(game_name)
+        self.lutris_thread.log.connect(self._wine_log)
+
+        def on_ok(profile):
+            self._wine_log("Trovato su Lutris.")
+            self._show_profile_dialog(game, None, profile, is_custom=False,
+                                       offer_save_as_custom=True)
+
+        def on_error(msg):
+            self._wine_log(f"Lutris: {msg}")
+            QMessageBox.information(self, "Nessun risultato utilizzabile",
+                                     f"{msg}\n\nPuoi provare i link manuali o salvare un profilo "
+                                     "personalizzato dopo aver configurato il gioco a mano.")
+
+        self.lutris_thread.finished_ok.connect(on_ok)
+        self.lutris_thread.finished_error.connect(on_error)
+        self.lutris_thread.start()
+
+    def _show_profile_dialog(self, game, key, profile, is_custom, offer_save_as_custom=False):
         source_label = "Profilo personalizzato" if is_custom else "Database curato (" + ", ".join(profile.get("sources", [])) + ")"
         display_name = profile.get("display_name", game["name"])
 
@@ -1413,18 +1563,29 @@ class MainWindow(QMainWindow):
         cpu = profile.get("cpu_limit_pct")
         details += f"<b>Limite CPU consigliato:</b> {f'{cpu}%' if cpu else 'nessuno'}<br>"
         if profile.get("notes"):
-            details += f"<br><b>Note:</b> {profile['notes']}<br>"
+            notes_html = profile['notes'].replace("\n", "<br>")
+            details += f"<br><b>Note:</b> {notes_html}<br>"
 
         box = QMessageBox(self)
         box.setWindowTitle("Configurazione suggerita")
         box.setTextFormat(Qt.RichText)
         box.setText(details)
         apply_btn = box.addButton("Applica al prefix", QMessageBox.AcceptRole)
+        save_btn = None
+        if offer_save_as_custom:
+            save_btn = box.addButton("Salva come profilo personalizzato", QMessageBox.ActionRole)
         box.addButton("Chiudi", QMessageBox.RejectRole)
         box.exec()
 
-        if box.clickedButton() == apply_btn:
+        clicked = box.clickedButton()
+        if clicked == apply_btn:
             self._apply_game_profile(game, profile)
+        elif save_btn is not None and clicked == save_btn:
+            profile_key = _normalize_game_name(game["name"])
+            self.custom_profiles[profile_key] = profile
+            save_json(CUSTOM_PROFILES_FILE, self.custom_profiles)
+            QMessageBox.information(self, "Profilo salvato",
+                                     f"Profilo Lutris salvato come personalizzato per '{game['name']}'.")
 
     def _apply_game_profile(self, game, profile):
         prefix_path = game["prefix"]
