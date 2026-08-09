@@ -76,6 +76,8 @@ DEFAULT_SETTINGS = {
     "sec_memory_limit": "2G",
     "sec_cpu_limit": "200",
     "enable_desktop_launcher_creation": False,
+    "unmount_on_exit": True,
+    "bchunk_output_dir": "",
 }
 
 WINDOWS_VERSIONS = [
@@ -437,6 +439,27 @@ class MainWindow(QMainWindow):
         self.btn_unmount.clicked.connect(self._on_unmount_clicked)
         btn_row2.addWidget(self.btn_unmount)
         layout.addLayout(btn_row2)
+
+        # --- Impostazioni chiusura e conversione ---
+        settings_box = QGroupBox("Impostazioni")
+        settings_layout = QVBoxLayout(settings_box)
+
+        self.unmount_on_exit_cb = QCheckBox(
+            "Smonta tutte le immagini automaticamente alla chiusura della GUI")
+        self.unmount_on_exit_cb.setChecked(self.settings.get("unmount_on_exit", True))
+        self.unmount_on_exit_cb.stateChanged.connect(self._save_settings_from_ui)
+        settings_layout.addWidget(self.unmount_on_exit_cb)
+
+        bchunk_row = QHBoxLayout()
+        bchunk_row.addWidget(QLabel("Cartella di output per ISO convertite (BIN/CUE):"))
+        self.bchunk_output_edit = QLineEdit(self.settings.get("bchunk_output_dir", ""))
+        bchunk_row.addWidget(self.bchunk_output_edit)
+        self.btn_browse_bchunk = QPushButton("Sfoglia...")
+        self.btn_browse_bchunk.clicked.connect(self._browse_bchunk_output)
+        bchunk_row.addWidget(self.btn_browse_bchunk)
+        settings_layout.addLayout(bchunk_row)
+
+        layout.addWidget(settings_box)
 
         return tab
 
@@ -868,6 +891,8 @@ class MainWindow(QMainWindow):
         self.settings["sec_memory_limit"] = self.sec_memory_limit_edit.text().strip() or "2G"
         self.settings["sec_cpu_limit"] = self.sec_cpu_limit_edit.text().strip() or "200"
         self.settings["enable_desktop_launcher_creation"] = self.enable_launcher_creation_checkbox.isChecked()
+        self.settings["unmount_on_exit"] = self.unmount_on_exit_cb.isChecked()
+        self.settings["bchunk_output_dir"] = self.bchunk_output_edit.text().strip()
         save_json(SETTINGS_FILE, self.settings)
 
     def _load_security_settings_into_ui(self):
@@ -923,6 +948,14 @@ class MainWindow(QMainWindow):
         env.insert("SANDBOX_DISABLE_ZDRIVE", _val("SANDBOX_DISABLE_ZDRIVE", self.sec_disable_zdrive))
         env.insert("SANDBOX_EXE_RW", _val("SANDBOX_EXE_RW", self.sec_exe_rw))
         return env
+
+    def _browse_bchunk_output(self):
+        path = QFileDialog.getExistingDirectory(
+            self, "Seleziona la cartella di output per le ISO convertite",
+            self.settings.get("bchunk_output_dir", "") or self.settings["games_root"])
+        if path:
+            self.bchunk_output_edit.setText(path)
+            self._save_settings_from_ui()
 
     def _browse_prefix_root(self):
         path = QFileDialog.getExistingDirectory(
@@ -1288,10 +1321,20 @@ class MainWindow(QMainWindow):
             return
 
         self._log(f"Conversione BIN/CUE in ISO tramite bchunk: {bin_path}")
-        tmp_dir = tempfile.mkdtemp(prefix="wine-sandbox-gui-bincue-")
+
+        # Usa la cartella di output configurata, o una temporanea se non impostata
+        output_dir = self.settings.get("bchunk_output_dir", "").strip()
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            base_name = Path(bin_path).stem
+            output_prefix = os.path.join(output_dir, base_name)
+        else:
+            tmp_dir = tempfile.mkdtemp(prefix="wine-sandbox-gui-bincue-")
+            output_prefix = os.path.join(tmp_dir, "track")
+
         try:
             result = subprocess.run(
-                ["bchunk", "-v", bin_path, cue_path, os.path.join(tmp_dir, "track")],
+                ["bchunk", "-v", bin_path, cue_path, output_prefix],
                 capture_output=True, text=True
             )
             self._log(result.stdout)
@@ -1300,7 +1343,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Errore bchunk", "La conversione BIN/CUE è fallita. Vedi il log.")
                 return
 
-            iso_candidates = sorted(Path(tmp_dir).glob("track*.iso"))
+            iso_candidates = sorted(Path(output_prefix).parent.glob(Path(output_prefix).name + "*.iso"))
             if not iso_candidates:
                 QMessageBox.critical(
                     self, "Nessuna ISO generata",
@@ -1311,6 +1354,8 @@ class MainWindow(QMainWindow):
 
             first_iso = str(iso_candidates[0])
             self._log(f"ISO generata: {first_iso}")
+            if output_dir:
+                self._log(f"ISO conservata in: {output_dir}")
             self._mount_via_udisks(first_iso)
 
         except Exception as e:
@@ -1874,6 +1919,32 @@ class MainWindow(QMainWindow):
             )
         except Exception as e:
             QMessageBox.critical(self, "Errore", f"Errore durante la copia dei file: {e}")
+
+    # ------------------------------------------------------------------
+    # Chiusura applicazione
+    # ------------------------------------------------------------------
+    def _unmount_all(self):
+        """Smonta tutte le immagini attualmente montate via udisksctl."""
+        if not self.mounted_images:
+            return
+        self._log(f"\nSmontaggio di {len(self.mounted_images)} immagini alla chiusura...")
+        for entry in list(self.mounted_images):
+            device = entry["device"]
+            try:
+                subprocess.run(["udisksctl", "unmount", "-b", device],
+                               capture_output=True, text=True, timeout=10)
+                subprocess.run(["udisksctl", "loop-delete", "-b", device],
+                               capture_output=True, text=True, timeout=10)
+                self._log(f"  Smontato: {entry.get('path', device)}")
+            except Exception as e:
+                self._log(f"  ERRORE smontaggio {device}: {e}")
+        self.mounted_images.clear()
+        self._refresh_mounted_list()
+
+    def closeEvent(self, event):
+        if self.settings.get("unmount_on_exit", True) and self.mounted_images:
+            self._unmount_all()
+        event.accept()
 
 
 def main():
