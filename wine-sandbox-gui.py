@@ -4,10 +4,14 @@ wine-sandbox-gui.py - Frontend grafico per gestire ed eseguire giochi
 abandonware attraverso wine-sandbox (isolamento bwrap: rete disabilitata,
 capability Linux disattivate, filesystem in gran parte read-only).
 
-Tre sezioni:
+Sezioni:
   - Giochi: libreria di giochi installati, installazione nuovi, avvio in sandbox
   - Immagini ottiche: montaggio ISO/IMG/NRG/BIN+CUE senza sudo (udisksctl)
-  - Prefix Wine: creazione prefix, versione Windows, winecfg, winetricks
+  - Prefix Wine: creazione prefix, versione Windows, winecfg/regedit/winetricks,
+    esecuzione di eseguibili standalone in sandbox
+  - Scansione: scansione malware opzionale di un file (ClamAV locale, VirusTotal,
+    Hybrid Analysis/Falcon Sandbox) a piacimento
+  - Sistema: dipendenze, integrazione desktop, backup
 
 Richiede:
   - PySide6:       pip install --break-system-packages PySide6
@@ -786,6 +790,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_games_tab(), "Giochi")
         tabs.addTab(self._build_mount_tab(), "Immagini ottiche")
         tabs.addTab(self._build_prefix_tab(), "Prefix Wine")
+        tabs.addTab(self._build_scan_tab(), "Scansione")
         tabs.addTab(self._build_system_tab(), "Sistema")
 
     # ------------------------------------------------------------------
@@ -1134,6 +1139,12 @@ class MainWindow(QMainWindow):
         tools_btn_row.addWidget(self.btn_open_regedit)
         tools_layout.addLayout(tools_btn_row)
 
+        self.btn_open_winetricks_gui = QPushButton("🧩 Apri winetricks (interfaccia grafica)")
+        self.btn_open_winetricks_gui.clicked.connect(self._on_open_winetricks_gui)
+        tools_btn_row2 = QHBoxLayout()
+        tools_btn_row2.addWidget(self.btn_open_winetricks_gui)
+        tools_layout.addLayout(tools_btn_row2)
+
         self.winecfg_ensure_zdrive_cb = QCheckBox(
             "Ricrea automaticamente l'unità Z: (accesso alla radice del filesystem reale) "
             "prima di aprire winecfg/regedit - necessario per accedere a file esterni "
@@ -1143,6 +1154,20 @@ class MainWindow(QMainWindow):
         tools_layout.addWidget(self.winecfg_ensure_zdrive_cb)
 
         scroll_layout.addWidget(tools_box)
+
+        run_box = QGroupBox("Esegui eseguibile standalone nel prefix")
+        run_layout = QVBoxLayout(run_box)
+        run_info = QLabel(
+            "Lancia un eseguibile Windows (es. un tool di patch, un .bat, un file "
+            "scaricato a parte) con questo prefix, DENTRO la sandbox (rete disabilitata, "
+            "home nascosta, filesystem in sola lettura)."
+        )
+        run_info.setWordWrap(True)
+        run_layout.addWidget(run_info)
+        self.btn_run_standalone = QPushButton("▶ Esegui un eseguibile nel prefix...")
+        self.btn_run_standalone.clicked.connect(self._on_run_standalone)
+        run_layout.addWidget(self.btn_run_standalone)
+        scroll_layout.addWidget(run_box)
 
         winetricks_box = QGroupBox(
             "Installa dipendenze (winetricks - ATTENZIONE: rete abilitata per il download)")
@@ -1208,6 +1233,94 @@ class MainWindow(QMainWindow):
         splitter.setSizes([320, 730])
 
         self._update_prefix_button_states()
+        return tab
+
+    # ------------------------------------------------------------------
+    # Tab Scansione
+    # ------------------------------------------------------------------
+    def _build_scan_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        scroll.setWidget(container)
+        layout.addWidget(scroll, stretch=1)
+
+        intro_box = QGroupBox("Cos'è")
+        intro_layout = QVBoxLayout(intro_box)
+        intro_info = QLabel(
+            "Scansiona un file (es. un installer scaricato) prima di eseguirlo, "
+            "a piacimento. Nessuna scansione è automatica o obbligatoria: puoi "
+            "anche usarla durante l'installazione di un nuovo gioco (ti verrà "
+            "chiesto se vuoi scansionare il setup)."
+        )
+        intro_info.setWordWrap(True)
+        intro_layout.addWidget(intro_info)
+        container_layout.addWidget(intro_box)
+
+        tools_box = QGroupBox("Tool di scansione")
+        tools_layout = QVBoxLayout(tools_box)
+
+        self.scan_use_clamav_cb = QCheckBox(
+            "ClamAV locale (se installato - scansione istantanea, offline, gratuita)")
+        self.scan_use_clamav_cb.setChecked(True)
+        self.scan_use_clamav_cb.stateChanged.connect(self._save_settings_from_ui)
+        tools_layout.addWidget(self.scan_use_clamav_cb)
+
+        self.scan_use_vt_cb = QCheckBox("VirusTotal (hash + upload, richiede API key gratuita)")
+        self.scan_use_vt_cb.setChecked(False)
+        self.scan_use_vt_cb.stateChanged.connect(self._save_settings_from_ui)
+        tools_layout.addWidget(self.scan_use_vt_cb)
+
+        vt_key_row = QHBoxLayout()
+        vt_key_row.addWidget(QLabel("  VirusTotal API key:"))
+        self.vt_api_key_edit = QLineEdit()
+        self.vt_api_key_edit.setEchoMode(QLineEdit.Password)
+        self.vt_api_key_edit.editingFinished.connect(self._save_settings_from_ui)
+        vt_key_row.addWidget(self.vt_api_key_edit)
+        vt_link = QLabel("<a href='https://www.virustotal.com/gui/join-us'>Ottieni una API key gratuita</a>")
+        vt_link.setOpenExternalLinks(True)
+        vt_key_row.addWidget(vt_link)
+        tools_layout.addLayout(vt_key_row)
+
+        self.scan_use_falcon_cb = QCheckBox(
+            "Hybrid Analysis / Falcon Sandbox (analisi comportamentale completa, ~15 min, "
+            "richiede API key gratuita separata - usata solo se VirusTotal segnala qualcosa)")
+        self.scan_use_falcon_cb.setChecked(False)
+        self.scan_use_falcon_cb.stateChanged.connect(self._save_settings_from_ui)
+        tools_layout.addWidget(self.scan_use_falcon_cb)
+
+        falcon_key_row = QHBoxLayout()
+        falcon_key_row.addWidget(QLabel("  Hybrid Analysis API key:"))
+        self.falcon_api_key_edit = QLineEdit()
+        self.falcon_api_key_edit.setEchoMode(QLineEdit.Password)
+        self.falcon_api_key_edit.editingFinished.connect(self._save_settings_from_ui)
+        falcon_key_row.addWidget(self.falcon_api_key_edit)
+        falcon_link = QLabel("<a href='https://www.hybrid-analysis.com/signup'>Ottieni una API key gratuita</a>")
+        falcon_link.setOpenExternalLinks(True)
+        falcon_key_row.addWidget(falcon_link)
+        tools_layout.addLayout(falcon_key_row)
+
+        container_layout.addWidget(tools_box)
+
+        scan_btn_box = QGroupBox("Esegui una scansione")
+        scan_btn_layout = QVBoxLayout(scan_btn_box)
+        scan_btn_layout.addWidget(QLabel(
+            "Scegli un qualsiasi file e scansionalo con i tool abilitati qui sopra. "
+            "Il file non viene eseguito, solo analizzato."))
+        self.btn_scan_file = QPushButton("🛡 Scansiona file...")
+        self.btn_scan_file.clicked.connect(self._on_scan_file_clicked)
+        scan_btn_layout.addWidget(self.btn_scan_file)
+        container_layout.addWidget(scan_btn_box)
+
+        layout.addWidget(QLabel("Storico scansioni (questa sessione):"))
+        self.scan_history_list = QListWidget()
+        layout.addWidget(self.scan_history_list)
+
         return tab
 
     # ------------------------------------------------------------------
@@ -1299,62 +1412,6 @@ class MainWindow(QMainWindow):
         config_layout.addLayout(config_btn_row)
 
         container_layout.addWidget(config_box)
-
-        scan_box = QGroupBox("Scansione malware (a piacimento, non obbligatoria)")
-        scan_layout = QVBoxLayout(scan_box)
-        scan_info = QLabel(
-            "Scansiona un file (es. un installer scaricato) prima di eseguirlo. "
-            "Disponibile come pulsante indipendente qui sotto e come opzione durante "
-            "l'installazione di un nuovo gioco. Nessuna scansione è automatica."
-        )
-        scan_info.setWordWrap(True)
-        scan_layout.addWidget(scan_info)
-
-        self.scan_use_clamav_cb = QCheckBox(
-            "ClamAV locale (se installato - scansione istantanea, offline, gratuita)")
-        self.scan_use_clamav_cb.setChecked(True)
-        self.scan_use_clamav_cb.stateChanged.connect(self._save_settings_from_ui)
-        scan_layout.addWidget(self.scan_use_clamav_cb)
-
-        self.scan_use_vt_cb = QCheckBox("VirusTotal (hash + upload, richiede API key gratuita)")
-        self.scan_use_vt_cb.setChecked(False)
-        self.scan_use_vt_cb.stateChanged.connect(self._save_settings_from_ui)
-        scan_layout.addWidget(self.scan_use_vt_cb)
-
-        vt_key_row = QHBoxLayout()
-        vt_key_row.addWidget(QLabel("  VirusTotal API key:"))
-        self.vt_api_key_edit = QLineEdit()
-        self.vt_api_key_edit.setEchoMode(QLineEdit.Password)
-        self.vt_api_key_edit.editingFinished.connect(self._save_settings_from_ui)
-        vt_key_row.addWidget(self.vt_api_key_edit)
-        vt_link = QLabel("<a href='https://www.virustotal.com/gui/join-us'>Ottieni una API key gratuita</a>")
-        vt_link.setOpenExternalLinks(True)
-        vt_key_row.addWidget(vt_link)
-        scan_layout.addLayout(vt_key_row)
-
-        self.scan_use_falcon_cb = QCheckBox(
-            "Hybrid Analysis / Falcon Sandbox (analisi comportamentale completa, ~15 min, "
-            "richiede API key gratuita separata - usata solo se VirusTotal segnala qualcosa)")
-        self.scan_use_falcon_cb.setChecked(False)
-        self.scan_use_falcon_cb.stateChanged.connect(self._save_settings_from_ui)
-        scan_layout.addWidget(self.scan_use_falcon_cb)
-
-        falcon_key_row = QHBoxLayout()
-        falcon_key_row.addWidget(QLabel("  Hybrid Analysis API key:"))
-        self.falcon_api_key_edit = QLineEdit()
-        self.falcon_api_key_edit.setEchoMode(QLineEdit.Password)
-        self.falcon_api_key_edit.editingFinished.connect(self._save_settings_from_ui)
-        falcon_key_row.addWidget(self.falcon_api_key_edit)
-        falcon_link = QLabel("<a href='https://www.hybrid-analysis.com/signup'>Ottieni una API key gratuita</a>")
-        falcon_link.setOpenExternalLinks(True)
-        falcon_key_row.addWidget(falcon_link)
-        scan_layout.addLayout(falcon_key_row)
-
-        self.btn_scan_file = QPushButton("🛡 Scansiona file...")
-        self.btn_scan_file.clicked.connect(self._on_scan_file_clicked)
-        scan_layout.addWidget(self.btn_scan_file)
-
-        container_layout.addWidget(scan_box)
 
         layout.addWidget(QLabel("Log operazioni di sistema:"))
         self.system_log = QPlainTextEdit()
@@ -2241,6 +2298,7 @@ class MainWindow(QMainWindow):
         def on_scan_finished(result):
             log_view.appendPlainText("\n[scansione completata]")
             self._show_scan_results(result)
+            self._add_scan_history_entry(result)
             if on_finished:
                 on_finished(result)
             try:
@@ -2334,6 +2392,21 @@ class MainWindow(QMainWindow):
             open_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(report_url)))
         msg.addButton(QMessageBox.Close)
         msg.exec()
+
+    def _add_scan_history_entry(self, result):
+        """Aggiunge una voce allo storico scansioni della tab Scansione."""
+        if not hasattr(self, "scan_history_list"):
+            return
+        clamav = result.get("clamav", {})
+        vt = result.get("virustotal", {})
+        if clamav.get("status") == "infected" or vt.get("status") == "flagged":
+            badge = "⚠️"
+        elif clamav.get("status") == "ok" or vt.get("status") == "clean":
+            badge = "✅"
+        else:
+            badge = "⚪"
+        filename = os.path.basename(result.get("file", ""))
+        self.scan_history_list.insertItem(0, f"{badge}  {filename}  ({result.get('sha256', '?')[:12]}…)")
 
     def _on_install_clicked(self):
         prefix = self._choose_prefix_path("Prefix per l'installazione")
@@ -3025,6 +3098,43 @@ class MainWindow(QMainWindow):
         if not entry:
             return
         self._run_wine_tool(entry["path"], entry.get("arch", ""), "wine", ["regedit"], detached=True)
+
+    def _on_open_winetricks_gui(self):
+        """Apre la GUI di winetricks sul prefix selezionato, in modalità
+        --setup (rete abilitata per il download dei verbi, come il flusso
+        di installazione dipendenze)."""
+        entry = self._selected_prefix()
+        if not entry:
+            return
+        confirm = QMessageBox.question(
+            self, "Rete abilitata",
+            "La GUI di winetricks deve poter scaricare i componenti richiesti, "
+            "quindi verrà eseguita in modalità --setup con la rete ABILITATA "
+            "(solo per questa operazione).\n\nProcedere?")
+        if confirm != QMessageBox.Yes:
+            return
+        ws_program, ws_args = self._wine_sandbox_launch_cmd(["--setup", entry["path"], "--gui"])
+        self._wine_log(f"\n$ {ws_program} {' '.join(ws_args)}\n")
+        self._run_wine_tool(entry["path"], entry.get("arch", ""), ws_program, ws_args[1:], detached=True)
+
+    def _on_run_standalone(self):
+        """Esegue un eseguibile Windows scelto dall'utente con il prefix
+        selezionato, DENTRO la sandbox (modalità gioco, rete disabilitata)."""
+        entry = self._selected_prefix()
+        if not entry:
+            return
+        drive_c = os.path.join(entry["path"], "drive_c")
+        start_dir = drive_c if os.path.isdir(drive_c) else entry["path"]
+        exe_path, _ = QFileDialog.getOpenFileName(
+            self, "Seleziona l'eseguibile da eseguire nel prefix",
+            start_dir, "Eseguibili Windows (*.exe *.EXE *.bat *.cmd)")
+        if not exe_path:
+            return
+        if not os.path.isfile(exe_path):
+            QMessageBox.critical(self, "Errore", f"File non trovato:\n{exe_path}")
+            return
+        self._wine_log(f"Avvio eseguibile standalone (sandbox): {exe_path} nel prefix {entry['path']}")
+        self._run_process([entry["path"], exe_path])
 
     def _on_install_dependencies(self):
         entry = self._selected_prefix()
