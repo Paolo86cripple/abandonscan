@@ -16,6 +16,12 @@
 #      wine-sandbox --init <prefix> [arch]
 #      (arch opzionale: win64, win32; se omesso usa il default WoW64)
 #
+#   4) Installazione (--install): come modalità gioco ma con Z: abilitata
+#      (sola lettura) per permettere all'installer di leggere file esterni
+#      (es. setup.exe su disco USB). Filesystem in sola lettura, nessun
+#      accesso in scrittura fuori dal prefix. Massima restrizione.
+#      wine-sandbox --install <prefix> <setup.exe> [argomenti...]
+#
 # TOGGLE DI SICUREZZA (variabili d'ambiente, tutte opzionali):
 #   SANDBOX_HIDE_HOME=0        Non nascondere la home (di default nascosta)
 #   SANDBOX_CAP_DROP=0         Non droppare le capability Linux (di default droppate)
@@ -45,12 +51,16 @@ MAX_DEPTH=5  # non usato qui, resta per compatibilità script scan
 
 INIT_MODE=0
 SETUP_MODE=0
+INSTALL_MODE=0
 
 if [ "${1:-}" = "--init" ]; then
     INIT_MODE=1
     shift
 elif [ "${1:-}" = "--setup" ]; then
     SETUP_MODE=1
+    shift
+elif [ "${1:-}" = "--install" ]; then
+    INSTALL_MODE=1
     shift
 fi
 
@@ -106,8 +116,9 @@ fi
 PULSE_SOCKET="/run/user/$(id -u)/pulse/native"
 PIPEWIRE_SOCKET="/run/user/$(id -u)/pipewire-0"
 
-BWRAP_ARGS=(
+BWRAP_ARGS+=(
     --unshare-ipc
+    --unshare-uts
     --die-with-parent
     --new-session
 )
@@ -144,9 +155,9 @@ fi
 
 BWRAP_ARGS+=(--bind "$WINEPFX" "$WINEPFX" --tmpfs /tmp --tmpfs "/run/user/$(id -u)")
 
-# /run/media (dischi rimovibili/USB): bind-mount se esiste, per permettere
-# l'accesso a installer su dispositivi esterni.
-[ -d /run/media ] && BWRAP_ARGS+=(--bind-try /run/media /run/media)
+# /run/media (dischi rimovibili/USB): bind-mount in sola lettura se esiste.
+# L'installer deve leggere il setup.exe ma non deve poter scrivere sul disco USB.
+[ -d /run/media ] && BWRAP_ARGS+=(--ro-bind-try /run/media /run/media)
 
 if [ "$ALLOW_AUDIO" -eq 1 ]; then
     [ -S "$PIPEWIRE_SOCKET" ] && BWRAP_ARGS+=(--bind "$PIPEWIRE_SOCKET" "$PIPEWIRE_SOCKET")
@@ -168,12 +179,28 @@ if [ "$SETUP_MODE" -eq 0 ] && [ "$INIT_MODE" -eq 0 ]; then
     EXE="$(realpath "$1")"
     shift
     EXE_DIR="$(dirname "$EXE")"
-    # Bind-mounta sempre la directory dell'EXE: Wine ha bisogno di accedere
-    # ai file dell'installer/gioco. Indipendente da HIDE_HOME.
-    BWRAP_ARGS+=(--bind "$EXE_DIR" "$EXE_DIR")
-    echo ">> Avvio in sandbox: $EXE"
-    [ "$NET_ISOLATED" -eq 1 ] && echo "   Rete: DISABILITATA" || echo "   Rete: ⚠️ ABILITATA (compatibilità)"
-    [ "$HIDE_HOME" -eq 1 ] && echo "   Home: nascosta" || echo "   Home: ⚠️ visibile (compatibilità)"
+    if [ "$INSTALL_MODE" -eq 1 ]; then
+        # Modalità installazione: EXE_DIR in sola lettura (l'installer legge,
+        # non scrive nella cartella sorgente). Z: abilitata ma tutti i mount
+        # sono già ro-bind, quindi l'installer non può scrivere fuori dal prefix.
+        BWRAP_ARGS+=(--ro-bind "$EXE_DIR" "$EXE_DIR")
+        # Assicura che Z: esista per questa sessione (Wine la usa per risolvere
+        # i path Unix dei file sorgente).
+        if [ ! -e "$WINEPFX/dosdevices/z:" ]; then
+            ln -sf / "$WINEPFX/dosdevices/z:"
+        fi
+        echo ">> Installazione in sandbox: $EXE"
+        echo "   Rete: DISABILITATA"
+        echo "   Home: nascosta"
+        echo "   Z: abilitata (sola lettura - l'installer vede i file sorgente)"
+        echo "   Filesystem: SOLO LETTURA (scrittura solo nel prefix)"
+    else
+        # Modalità gioco: bind EXE_DIR read-write (il gioco può salvare)
+        BWRAP_ARGS+=(--bind "$EXE_DIR" "$EXE_DIR")
+        echo ">> Avvio in sandbox: $EXE"
+        [ "$NET_ISOLATED" -eq 1 ] && echo "   Rete: DISABILITATA" || echo "   Rete: ⚠️ ABILITATA (compatibilità)"
+        [ "$HIDE_HOME" -eq 1 ] && echo "   Home: nascosta" || echo "   Home: ⚠️ visibile (compatibilità)"
+    fi
 elif [ "$INIT_MODE" -eq 1 ]; then
     echo ">> Inizializzazione prefix in sandbox: $WINEPFX"
     echo "   Rete: DISABILITATA"

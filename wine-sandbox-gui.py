@@ -1058,8 +1058,10 @@ class MainWindow(QMainWindow):
             return
 
         wine_program, wine_args = self._wine_sandbox_launch_cmd(args)
-        prefix_path = args[0] if args else None
-        exe_path = args[1] if len(args) > 1 else None
+        # Salta --install/--init/--setup per estrarre prefix/exe
+        offset = 1 if args and args[0] in ("--install", "--init", "--setup") else 0
+        prefix_path = args[offset] if len(args) > offset else None
+        exe_path = args[offset + 1] if len(args) > offset + 1 else None
 
         env = self._sandbox_env(env_overrides)
         env_dict = {key: env.value(key) for key in env.keys() if key.startswith("SANDBOX_")}
@@ -1193,6 +1195,20 @@ class MainWindow(QMainWindow):
         self._log(f"Avvio installazione da: {setup_exe}")
         self._log("Al termine del setup, chiudi la finestra dell'installer per continuare.")
 
+        # Avviso di sicurezza: spiegazione delle misure adottate
+        QMessageBox.information(
+            self, "Installazione sandboxed",
+            "L'installer verrà eseguito in sandbox con le seguenti protezioni:\n\n"
+            "• Rete: DISABILITATA (nessuna connessione internet)\n"
+            "• Home: nascosta (tmpfs vuota)\n"
+            "• Filesystem: SOLO LETTURA (/usr, /etc, /lib, /run/media)\n"
+            "• Capability Linux: droppate (nessun accesso privilegiato)\n"
+            "• PID isolati (l'installer non vede altri processi)\n"
+            "• Z: temporaneamente visibile in sola lettura (per leggere il setup.exe)\n"
+            "• Scrittura permessa SOLO dentro il prefix Wine\n\n"
+            "Chiudi l'installer al termine per continuare."
+        )
+
         def after_install(exit_code):
             reply = QMessageBox.question(
                 self, "Installazione completata",
@@ -1211,11 +1227,9 @@ class MainWindow(QMainWindow):
                         save_json(GAMES_FILE, self.games)
                         self._refresh_game_list()
 
-        # Z: deve essere attiva durante l'installazione: Wine la usa per
-        # risolvere il path Unix del setup.exe (es. su disco USB).
-        # wine-sandbox la rimuoverà di nuovo quando si lancia il gioco sandboxed.
-        self._run_process([prefix, setup_exe], on_finished=after_install,
-                          env_overrides={"SANDBOX_DISABLE_ZDRIVE": "0"})
+        # Modalità --install: Z: abilitata in sola lettura, EXE_DIR read-only,
+        # tutto il filesystem in sola lettura, scrittura solo nel prefix.
+        self._run_process(["--install", prefix, setup_exe], on_finished=after_install)
 
     # ------------------------------------------------------------------
     # Azioni tab Montaggio immagini
