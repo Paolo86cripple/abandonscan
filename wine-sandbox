@@ -10,6 +10,12 @@
 #   2) Setup prefix (--setup): rete ABILITATA per winetricks.
 #      wine-sandbox --setup <prefix> <verbo_winetricks> [altri verbi...]
 #
+#   3) Inizializzazione prefix (--init): crea un nuovo prefix Wine con
+#      wineboot -u, rete disabilitata, sandbox parziale. Crea la directory
+#      se non esiste, rimuove automaticamente l'unità Z: al termine.
+#      wine-sandbox --init <prefix> [arch]
+#      (arch opzionale: win64, win32; se omesso usa il default WoW64)
+#
 # TOGGLE DI SICUREZZA (variabili d'ambiente, tutte opzionali):
 #   SANDBOX_HIDE_HOME=0        Non nascondere la home (di default nascosta)
 #   SANDBOX_CAP_DROP=0         Non droppare le capability Linux (di default droppate)
@@ -37,14 +43,23 @@ set -euo pipefail
 
 MAX_DEPTH=5  # non usato qui, resta per compatibilità script scan
 
-if [ "${1:-}" = "--setup" ]; then
+INIT_MODE=0
+SETUP_MODE=0
+
+if [ "${1:-}" = "--init" ]; then
+    INIT_MODE=1
+    shift
+elif [ "${1:-}" = "--setup" ]; then
     SETUP_MODE=1
     shift
-else
-    SETUP_MODE=0
 fi
 
-if [ $# -lt 2 ]; then
+if [ "$INIT_MODE" -eq 1 ]; then
+    if [ $# -lt 1 ]; then
+        echo "Uso: $0 --init <wineprefix> [arch]" >&2
+        exit 1
+    fi
+elif [ $# -lt 2 ]; then
     if [ "$SETUP_MODE" -eq 1 ]; then
         echo "Uso: $0 --setup <wineprefix> <verbo_winetricks> [altri verbi...]" >&2
     else
@@ -53,8 +68,21 @@ if [ $# -lt 2 ]; then
     exit 1
 fi
 
+# In modalità --init la directory potrebbe non esistere ancora: la creiamo
+# prima di realpath, che altrimenti fallirebbe su path inesistenti.
+if [ "$INIT_MODE" -eq 1 ]; then
+    mkdir -p "$1"
+fi
+
 WINEPFX="$(realpath "$1")"
 shift
+
+# Architettura opzionale per --init (win64/win32/vuoto = WoW64 default)
+WINEARCH_VAL=""
+if [ "$INIT_MODE" -eq 1 ] && [ $# -ge 1 ]; then
+    WINEARCH_VAL="$1"
+    shift
+fi
 
 if [ ! -d "$WINEPFX" ]; then
     echo "Errore: il prefix '$WINEPFX' non esiste." >&2
@@ -87,6 +115,7 @@ BWRAP_ARGS=(
 [ "$UNSHARE_PID" -eq 1 ] && BWRAP_ARGS+=(--unshare-pid)
 [ "$CAP_DROP" -eq 1 ] && BWRAP_ARGS+=(--cap-drop ALL)
 
+# Rete disabilitata in modalità gioco e init; abilitata solo in --setup
 if [ "$ALLOW_NETWORK" -eq 0 ] && [ "$SETUP_MODE" -eq 0 ]; then
     BWRAP_ARGS+=(--unshare-net)
     NET_ISOLATED=1
@@ -131,7 +160,7 @@ if [ "$SETUP_MODE" -eq 1 ] && [ -d "$HOME/.cache/winetricks" ]; then
     BWRAP_ARGS+=(--bind "$HOME/.cache/winetricks" "$HOME/.cache/winetricks")
 fi
 
-if [ "$SETUP_MODE" -eq 0 ]; then
+if [ "$SETUP_MODE" -eq 0 ] && [ "$INIT_MODE" -eq 0 ]; then
     EXE="$(realpath "$1")"
     shift
     EXE_DIR="$(dirname "$EXE")"
@@ -141,6 +170,11 @@ if [ "$SETUP_MODE" -eq 0 ]; then
     echo ">> Avvio in sandbox: $EXE"
     [ "$NET_ISOLATED" -eq 1 ] && echo "   Rete: DISABILITATA" || echo "   Rete: ⚠️ ABILITATA (compatibilità)"
     [ "$HIDE_HOME" -eq 1 ] && echo "   Home: nascosta" || echo "   Home: ⚠️ visibile (compatibilità)"
+elif [ "$INIT_MODE" -eq 1 ]; then
+    echo ">> Inizializzazione prefix in sandbox: $WINEPFX"
+    echo "   Rete: DISABILITATA"
+    [ "$HIDE_HOME" -eq 1 ] && echo "   Home: nascosta" || echo "   Home: ⚠️ visibile (compatibilità)"
+    [ -n "$WINEARCH_VAL" ] && echo "   Architettura: $WINEARCH_VAL" || echo "   Architettura: WoW64 (predefinita)"
 fi
 
 COMMON_ENV=(
@@ -151,13 +185,18 @@ COMMON_ENV=(
     XDG_RUNTIME_DIR="/run/user/$(id -u)"
     PULSE_SERVER="unix:$PULSE_SOCKET"
 )
-# NOTA: WINEARCH non va impostato qui. Conta solo alla CREAZIONE del prefix
-# (wineboot -u iniziale); su un prefix già esistente, wine legge l'architettura
-# già registrata al suo interno. Forzarlo ad ogni esecuzione romperebbe i
-# prefix su build Wine moderne "WoW64-only" (Wine 10+), che non accettano
-# più WINEARCH=win32 come valore per un prefix già creato.
+# WINEARCH viene impostato SOLO in modalità --init: è l'unico momento in cui
+# conta (creazione del prefix). Su un prefix già esistente, wine legge
+# l'architettura registrata al suo interno. Forzarlo ad ogni esecuzione
+# romperebbe i prefix su build Wine moderne "WoW64-only" (Wine 10+).
+if [ "$INIT_MODE" -eq 1 ] && [ -n "$WINEARCH_VAL" ]; then
+    COMMON_ENV+=(WINEARCH="$WINEARCH_VAL")
+fi
 
-if [ "$SETUP_MODE" -eq 1 ]; then
+if [ "$INIT_MODE" -eq 1 ]; then
+    exec bwrap "${BWRAP_ARGS[@]}" "${COMMON_ENV[@]}" wineboot -u
+    # Dopo wineboot, la GUI rimuove Z: se SANDBOX_DISABLE_ZDRIVE è attivo
+elif [ "$SETUP_MODE" -eq 1 ]; then
     exec bwrap "${BWRAP_ARGS[@]}" "${COMMON_ENV[@]}" winetricks "$@"
 else
     if [ "$NET_ISOLATED" -eq 1 ] && [ "$ALLOW_LOOPBACK" -eq 1 ]; then

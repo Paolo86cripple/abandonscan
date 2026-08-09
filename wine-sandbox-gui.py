@@ -17,9 +17,11 @@ Richiede:
 
 Uso: python3 wine-sandbox-gui.py
 
-Nota sulla sicurezza: winecfg/wineboot/winetricks sono strumenti Wine
+Nota sulla sicurezza: winecfg e regedit sono strumenti Wine
 legittimi e vengono lanciati DIRETTAMENTE (senza bwrap), perché non
-eseguono mai il file di gioco non fidato. Solo l'installer e il gioco
+eseguono mai il file di gioco non fidato. La creazione del prefix
+(wineboot) passa invece attraverso wine-sandbox --init, con sandbox
+attiva (rete disabilitata, home nascosta). Solo l'installer e il gioco
 vero e proprio passano sempre attraverso wine-sandbox.
 """
 
@@ -102,6 +104,7 @@ DGVOODOO_REPO_API = "https://api.github.com/repos/dege-diosg/dgVoodoo2/releases/
 
 REQUIRED_TOOLS = [
     ("wine", "Esecuzione dei giochi Windows"),
+    ("wineboot", "Creazione/inizializzazione dei prefix Wine"),
     ("winetricks", "Installazione componenti (dxvk, corefonts, ecc.)"),
     ("bwrap", "Isolamento sandbox (rete disabilitata, cap-drop)"),
     ("udisksctl", "Montaggio ISO/IMG/NRG senza sudo"),
@@ -484,8 +487,10 @@ class MainWindow(QMainWindow):
 
         tools_note = QLabel(
             "⚠️ winecfg e regedit girano FUORI dalla sandbox (rete/home/Z: come sul sistema reale) "
-            "perché sono tool Wine fidati, non il gioco. Le protezioni si applicano solo a "
-            "▶ Gioca e 📦 Installa nella tab Giochi."
+            "perché sono tool Wine fidati, non il gioco.\n"
+            "La creazione del prefix (wineboot) usa wine-sandbox --init con sandbox attiva "
+            "(rete disabilitata, home nascosta).\n"
+            "Le protezioni si applicano a ▶ Gioca, 📦 Installa e ➕ Crea prefix."
         )
         tools_note.setWordWrap(True)
         tools_layout.addWidget(tools_note)
@@ -1047,6 +1052,9 @@ class MainWindow(QMainWindow):
         self.process.setProcessEnvironment(env)
         self.process.setProcessChannelMode(QProcess.MergedChannels)
         self.process.readyReadStandardOutput.connect(self._on_process_output)
+        self.process.errorOccurred.connect(
+            lambda err: self._log(
+                f"\n[ERRORE QProcess: {self.process.errorString()}]\n"))
 
         context_label = "installazione" if (exe_path and "setup" in os.path.basename(exe_path).lower()) else "gioco"
 
@@ -1404,9 +1412,9 @@ class MainWindow(QMainWindow):
             # nostro QProcess principale, così non bloccano la finestra.
             proc = QProcess(self)
             proc.setProcessEnvironment(env)
-            proc.setProgram(program)
-            proc.setArguments(args)
-            proc.startDetached()
+            proc.errorOccurred.connect(
+                lambda err: self._wine_log(f"\n[ERRORE avvio {program}: {proc.errorString()}]\n"))
+            proc.startDetached(program, args)
             self._wine_log(f"$ {program} {' '.join(args)}  (avviato, finestra separata)")
             return
 
@@ -1420,11 +1428,12 @@ class MainWindow(QMainWindow):
         self.wine_tool_process.setProcessEnvironment(env)
         self.wine_tool_process.setProcessChannelMode(QProcess.MergedChannels)
         self.wine_tool_process.readyReadStandardOutput.connect(self._on_wine_tool_output)
+        self.wine_tool_process.errorOccurred.connect(
+            lambda err: self._wine_log(
+                f"\n[ERRORE QProcess: {self.wine_tool_process.errorString()}]\n"))
         self.wine_tool_process.finished.connect(
             lambda code, status: self._wine_log(f"\n[terminato con codice {code}]\n"))
-        self.wine_tool_process.setProgram(program)
-        self.wine_tool_process.setArguments(args)
-        self.wine_tool_process.start()
+        self.wine_tool_process.start(program, args)
 
     def _on_wine_tool_output(self):
         data = self.wine_tool_process.readAllStandardOutput().data().decode(errors="replace")
@@ -1456,9 +1465,26 @@ class MainWindow(QMainWindow):
         if os.path.exists(prefix_path) and os.listdir(prefix_path):
             QMessageBox.critical(self, "Errore", f"La cartella esiste già e non è vuota:\n{prefix_path}")
             return
-        os.makedirs(prefix_path, exist_ok=True)
 
-        self._wine_log(f"Creazione prefix in: {prefix_path} (architettura {arch})")
+        wine_sandbox = self._wine_sandbox_path()
+        if not shutil.which(wine_sandbox) and not os.path.isfile(wine_sandbox):
+            QMessageBox.critical(
+                self, "wine-sandbox non trovato",
+                f"Lo script wine-sandbox non è trovato in:\n{wine_sandbox}\n"
+                "Verifica il percorso nelle Impostazioni in alto.")
+            return
+
+        init_args = ["--init", prefix_path]
+        if arch:
+            init_args.append(arch)
+
+        self._wine_log(f"Creazione prefix in: {prefix_path} (architettura {arch or 'WoW64'})")
+        self._wine_log(f"$ {wine_sandbox} {' '.join(init_args)}")
+
+        if self.wine_tool_process is not None and self.wine_tool_process.state() != QProcess.NotRunning:
+            QMessageBox.warning(self, "Operazione in corso",
+                                 "C'è già un'operazione sul prefix in esecuzione. Attendi che finisca.")
+            return
 
         def after_boot(exit_code):
             if exit_code == 0:
@@ -1473,36 +1499,34 @@ class MainWindow(QMainWindow):
                     if os.path.lexists(z_link):
                         try:
                             os.remove(z_link)
-                            self._wine_log("Unità Z: rimossa subito dopo la creazione (accesso alla radice bloccato).")
+                            self._wine_log("Unità Z: rimossa (accesso alla radice bloccato).")
                         except OSError as e:
                             self._wine_log(f"ATTENZIONE: impossibile rimuovere Z: {e}")
             else:
-                self._wine_log("ATTENZIONE: wineboot ha restituito un codice di errore, controlla il log sopra.")
+                self._wine_log(
+                    f"ATTENZIONE: wineboot ha restituito codice {exit_code}. "
+                    "Il prefix potrebbe non essere stato inizializzato correttamente.")
+                if os.path.isdir(prefix_path) and not os.listdir(prefix_path):
+                    try:
+                        os.rmdir(prefix_path)
+                        self._wine_log("Cartella prefix vuota rimossa per allow retry.")
+                    except OSError:
+                        pass
+                QMessageBox.critical(
+                    self, "Errore creazione prefix",
+                    f"wineboot ha fallito (codice {exit_code}). Controlla il log per i dettagli.\n"
+                    "Verifica che wine e bwrap siano installati e funzionanti.")
 
-        self._run_wine_tool_with_callback(prefix_path, arch, "wineboot", ["-u"], after_boot)
-
-    def _run_wine_tool_with_callback(self, prefix_path, arch, program, args, on_finished):
-        env = QProcessEnvironment.systemEnvironment()
-        env.insert("WINEPREFIX", prefix_path)
-        if arch:  # stringa vuota = WoW64 predefinito, non forzare nulla
-            env.insert("WINEARCH", arch)
-
-        if self.wine_tool_process is not None and self.wine_tool_process.state() != QProcess.NotRunning:
-            QMessageBox.warning(self, "Operazione in corso",
-                                 "C'è già un'operazione sul prefix in esecuzione. Attendi che finisca.")
-            return
-
-        self._wine_log(f"\n$ {program} {' '.join(args)}\n")
         self.wine_tool_process = QProcess(self)
-        self.wine_tool_process.setProcessEnvironment(env)
         self.wine_tool_process.setProcessChannelMode(QProcess.MergedChannels)
         self.wine_tool_process.readyReadStandardOutput.connect(self._on_wine_tool_output)
-        self.wine_tool_process.finished.connect(lambda code, status: on_finished(code))
+        self.wine_tool_process.errorOccurred.connect(
+            lambda err: self._wine_log(
+                f"\n[ERRORE QProcess: {self.wine_tool_process.errorString()}]\n"))
+        self.wine_tool_process.finished.connect(lambda code, status: after_boot(code))
         self.wine_tool_process.finished.connect(
             lambda code, status: self._wine_log(f"\n[terminato con codice {code}]\n"))
-        self.wine_tool_process.setProgram(program)
-        self.wine_tool_process.setArguments(args)
-        self.wine_tool_process.start()
+        self.wine_tool_process.start(wine_sandbox, init_args)
 
     def _on_add_existing_prefix_clicked(self):
         path = QFileDialog.getExistingDirectory(
@@ -1595,6 +1619,9 @@ class MainWindow(QMainWindow):
         self.wine_tool_process = QProcess(self)
         self.wine_tool_process.setProcessChannelMode(QProcess.MergedChannels)
         self.wine_tool_process.readyReadStandardOutput.connect(self._on_wine_tool_output)
+        self.wine_tool_process.errorOccurred.connect(
+            lambda err: self._wine_log(
+                f"\n[ERRORE QProcess: {self.wine_tool_process.errorString()}]\n"))
         self.wine_tool_process.finished.connect(
             lambda code, status: self._wine_log(f"\n[winetricks terminato con codice {code}]\n"))
         self.wine_tool_process.start(wine_sandbox, args)
