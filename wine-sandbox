@@ -129,7 +129,15 @@ BWRAP_ARGS+=(
 )
 
 [ "$UNSHARE_PID" -eq 1 ] && BWRAP_ARGS+=(--unshare-pid)
-[ "$CAP_DROP" -eq 1 ] && BWRAP_ARGS+=(--cap-drop ALL)
+if [ "$CAP_DROP" -eq 1 ]; then
+    if [ "$ALLOW_DRI" -eq 1 ]; then
+        # Con GPU attiva, droppa tutto tranne CAP_SYS_ADMIN: serve per
+        # l'autenticazione DRM (amdgpu/radeon richiedono drmAuth).
+        BWRAP_ARGS+=(--cap-drop ALL --cap-add CAP_SYS_ADMIN)
+    else
+        BWRAP_ARGS+=(--cap-drop ALL)
+    fi
+fi
 
 # Rete disabilitata in modalità gioco e init; abilitata solo in --setup
 if [ "$ALLOW_NETWORK" -eq 0 ] && [ "$SETUP_MODE" -eq 0 ]; then
@@ -185,6 +193,18 @@ BWRAP_ARGS+=(
 )
 
 [ "$ALLOW_DRI" -eq 1 ] && BWRAP_ARGS+=(--dev-bind-try /dev/dri /dev/dri)
+
+# Mesa/Vulkan hanno bisogno di /sys per enumerare le GPU fisiche:
+# - /sys/class/drm: elenco dei device DRM (card0, renderD128, ecc.)
+# - /sys/dev/char: mappatura major:minor → device path (serve al loader)
+# Senza questi, il loader Mesa fallisce con "failed to retrieve device
+# information" e Vulkan con "init_physical_devices failed".
+if [ "$ALLOW_DRI" -eq 1 ]; then
+    BWRAP_ARGS+=(
+        --ro-bind-try /sys/class/drm /sys/class/drm
+        --ro-bind-try /sys/dev/char /sys/dev/char
+    )
+fi
 
 if [ "$HIDE_HOME" -eq 1 ]; then
     BWRAP_ARGS+=(--tmpfs /home --tmpfs /root)
