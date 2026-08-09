@@ -223,11 +223,22 @@ if [ "$SETUP_MODE" -eq 0 ] && [ "$INIT_MODE" -eq 0 ]; then
     EXE="$(realpath "$1")"
     shift
     EXE_DIR="$(dirname "$EXE")"
+
+    # Se EXE_DIR è dentro il prefix, il --bind $WINEPFX già lo copre.
+    # Non aggiungere un mount separato: sovrascriverebbe l'accesso in
+    # scrittura del prefix (read-only su un path che era read-write).
+    EXE_IN_PREFIX=0
+    case "$EXE_DIR" in
+        "$WINEPFX"/*) EXE_IN_PREFIX=1 ;;
+    esac
+
     if [ "$INSTALL_MODE" -eq 1 ]; then
         # Modalità installazione: EXE_DIR in sola lettura (l'installer legge,
         # non scrive nella cartella sorgente). Z: abilitata ma tutti i mount
         # sono già ro-bind, quindi l'installer non può scrivere fuori dal prefix.
-        BWRAP_ARGS+=(--ro-bind "$EXE_DIR" "$EXE_DIR")
+        if [ "$EXE_IN_PREFIX" -eq 0 ]; then
+            BWRAP_ARGS+=(--ro-bind "$EXE_DIR" "$EXE_DIR")
+        fi
         # Assicura che Z: esista per questa sessione (Wine la usa per risolvere
         # i path Unix dei file sorgente).
         if [ ! -e "$WINEPFX/dosdevices/z:" ]; then
@@ -242,16 +253,22 @@ if [ "$SETUP_MODE" -eq 0 ] && [ "$INIT_MODE" -eq 0 ]; then
         # Modalità gioco: EXE_DIR in sola lettura di default (il gioco non
         # deve scrivere nella sua cartella di installazione). SANDBOX_EXE_RW=1
         # permette scrittura per giochi che salvano i salvataggi accanto all'exe.
-        if [ "$EXE_RW" -eq 1 ]; then
+        # Se l'exe è dentro il prefix, il --bind $WINEPFX già gestisce l'accesso
+        # (read-write), non serve un mount separato.
+        if [ "$EXE_IN_PREFIX" -eq 1 ]; then
+            echo ">> Avvio in sandbox: $EXE"
+            echo "   (exe dentro il prefix - accesso gestito dal mount del prefix)"
+        elif [ "$EXE_RW" -eq 1 ]; then
             BWRAP_ARGS+=(--bind "$EXE_DIR" "$EXE_DIR")
             echo ">> Avvio in sandbox: $EXE"
+            echo "   Cartella gioco: ⚠️ scrittura abilitata"
         else
             BWRAP_ARGS+=(--ro-bind "$EXE_DIR" "$EXE_DIR")
             echo ">> Avvio in sandbox (read-only): $EXE"
+            echo "   Cartella gioco: sola lettura"
         fi
         [ "$NET_ISOLATED" -eq 1 ] && echo "   Rete: DISABILITATA" || echo "   Rete: ⚠️ ABILITATA (compatibilità)"
         [ "$HIDE_HOME" -eq 1 ] && echo "   Home: nascosta" || echo "   Home: ⚠️ visibile (compatibilità)"
-        [ "$EXE_RW" -eq 1 ] && echo "   Cartella gioco: ⚠️ scrittura abilitata" || echo "   Cartella gioco: sola lettura"
     fi
 elif [ "$INIT_MODE" -eq 1 ]; then
     echo ">> Inizializzazione prefix in sandbox: $WINEPFX"
