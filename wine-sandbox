@@ -27,6 +27,12 @@
 #   SANDBOX_CAP_DROP=0         Non droppare le capability Linux (di default droppate)
 #   SANDBOX_UNSHARE_PID=0      Non isolare la visibilità dei processi (di default isolata)
 #   SANDBOX_DRI=0              Non passare /dev/dri, niente accelerazione GPU (di default passato)
+#   SANDBOX_GPU_CAP_SYSADMIN=1 Espone /dev/dri/cardN intero (invece del solo
+#                              render node) e aggiunge CAP_SYS_ADMIN, necessario
+#                              per il DRM master authentication di alcuni
+#                              driver legacy. Di default OFF: si usa solo il
+#                              render node (/dev/dri/renderD1XX) che permette
+#                              rendering/compute GPU senza privilegi speciali.
 #   SANDBOX_AUDIO=0            Non passare i socket audio (di default passati)
 #   SANDBOX_ALLOW_LOOPBACK=1   Attiva l'interfaccia di loopback (localhost) pur
 #                              restando isolati da internet - utile per giochi
@@ -193,7 +199,21 @@ BWRAP_ARGS+=(
     --ro-bind /dev/null /etc/gshadow
 )
 
-[ "$ALLOW_DRI" -eq 1 ] && BWRAP_ARGS+=(--dev-bind-try /dev/dri /dev/dri)
+if [ "$ALLOW_DRI" -eq 1 ]; then
+    if [ "$GPU_CAP_SYSADMIN" -eq 1 ]; then
+        # Modalità compatibilità: espone /dev/dri intero (card0 incluso).
+        # card0 richiede DRM master (drmAuth), quindi serve CAP_SYS_ADMIN.
+        BWRAP_ARGS+=(--dev-bind-try /dev/dri /dev/dri)
+    else
+        # Modalità sicura (default): espone SOLO i render node
+        # (/dev/dri/renderD1XX). I render node fanno rendering/compute GPU
+        # senza bisogno di essere DRM master: nessun CAP_SYS_ADMIN richiesto.
+        # Lo scanout/display resta gestito dal compositor sull'host.
+        for node in /dev/dri/renderD*; do
+            [ -e "$node" ] && BWRAP_ARGS+=(--dev-bind-try "$node" "$node")
+        done
+    fi
+fi
 
 # Mesa/Vulkan hanno bisogno di /sys per enumerare le GPU fisiche:
 # - /sys/class/drm: elenco dei device DRM (card0, renderD128, ecc.)

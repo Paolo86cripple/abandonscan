@@ -314,8 +314,9 @@ class MainWindow(QMainWindow):
         security_layout.addWidget(self.sec_dri)
 
         self.sec_gpu_cap_sysadmin = QCheckBox(
-            "  ⚠️ Consenti CAP_SYS_ADMIN per GPU (necessario per driver amdgpu/radeon, "
-            "riduce la sicurezza - attiva solo se i giochi non partono)")
+            "  ⚠️ Usa /dev/dri completo + CAP_SYS_ADMIN invece del solo render node "
+            "(di default si usa solo renderD1XX, senza privilegi - attiva solo se "
+            "la GPU non funziona con driver legacy)")
         self.sec_gpu_cap_sysadmin.setChecked(False)
         self.sec_gpu_cap_sysadmin.stateChanged.connect(self._save_settings_from_ui)
         security_layout.addWidget(self.sec_gpu_cap_sysadmin)
