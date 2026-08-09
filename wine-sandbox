@@ -55,10 +55,16 @@
 #
 # HARDENING SEMPRE ATTIVO (non disattivabile, nessun impatto sui giochi):
 #   --unshare-cgroup-try  Isola la vista dei cgroup (nessun gioco ne ha bisogno)
-#   --disable-userns      Impedisce di creare user namespace annidati dentro
-#                          la sandbox (mitiga tecniche note di privilege
-#                          escalation/sandbox escape via nested userns)
 #   /etc/ssh mascherata    Nessuna chiave host SSH visibile al gioco
+#
+# NOTA: --disable-userns (blocco user namespace annidati) è stato valutato ma
+# NON è attivo: richiede --unshare-user, che a sua volta fallisce su sistemi
+# con user namespace non privilegiati disabilitati via sysctl
+# (kernel.unprivileged_userns_clone=0, es. alcune distro hardened/Debian).
+# Il rischio di rompere la sandbox ovunque su quei sistemi supera il beneficio
+# di sicurezza marginale contro un vettore di attacco già mitigato da
+# --cap-drop ALL (senza CAP_SYS_ADMIN un gioco non privilegiato non può
+# comunque creare user namespace annidati in molte configurazioni kernel).
 #   GPU via render node    Solo /dev/dri/renderD1XX esposto di default (non
 #                          card0): rendering/compute GPU senza CAP_SYS_ADMIN
 #
@@ -141,7 +147,6 @@ BWRAP_ARGS+=(
     --unshare-ipc
     --unshare-uts
     --unshare-cgroup-try
-    --disable-userns
     --die-with-parent
     --new-session
 )
