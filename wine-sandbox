@@ -150,17 +150,15 @@ BWRAP_ARGS+=(
     --dev /dev
 )
 
-# Masking di file sensibili in /proc (sostituiti con /dev/null o tmpfs vuota)
-# Impedisce al gioco di leggere info kernel, configurazione di rete, ecc.
+# Masking di file sensibili in /proc.
+# I FILE (kcore, kallsyms, sysrq-trigger) vanno mascherati con --ro-bind
+# /dev/null (tmpfs non funziona su un file). Le DIRECTORY (bus, scsi) con tmpfs.
 BWRAP_ARGS+=(
-    --tmpfs /proc/kcore
-    --tmpfs /proc/kallsyms
-    --tmpfs /proc/bus
-    --tmpfs /proc/scsi
-    --tmpfs /proc/sysrq-trigger
     --ro-bind /dev/null /proc/kcore
     --ro-bind /dev/null /proc/kallsyms
     --ro-bind /dev/null /proc/sysrq-trigger
+    --tmpfs /proc/bus
+    --tmpfs /proc/scsi
 )
 
 # /proc/sys in sola lettura (contiene parametri kernel tweakabili)
