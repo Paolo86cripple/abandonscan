@@ -144,6 +144,10 @@ fi
 
 BWRAP_ARGS+=(--bind "$WINEPFX" "$WINEPFX" --tmpfs /tmp --tmpfs "/run/user/$(id -u)")
 
+# /run/media (dischi rimovibili/USB): bind-mount se esiste, per permettere
+# l'accesso a installer su dispositivi esterni.
+[ -d /run/media ] && BWRAP_ARGS+=(--bind-try /run/media /run/media)
+
 if [ "$ALLOW_AUDIO" -eq 1 ]; then
     [ -S "$PIPEWIRE_SOCKET" ] && BWRAP_ARGS+=(--bind "$PIPEWIRE_SOCKET" "$PIPEWIRE_SOCKET")
     [ -S "$PULSE_SOCKET" ] && BWRAP_ARGS+=(--bind "$PULSE_SOCKET" "$PULSE_SOCKET")
@@ -164,9 +168,9 @@ if [ "$SETUP_MODE" -eq 0 ] && [ "$INIT_MODE" -eq 0 ]; then
     EXE="$(realpath "$1")"
     shift
     EXE_DIR="$(dirname "$EXE")"
-    if [ "$HIDE_HOME" -eq 1 ]; then
-        BWRAP_ARGS+=(--bind "$EXE_DIR" "$EXE_DIR")
-    fi
+    # Bind-mounta sempre la directory dell'EXE: Wine ha bisogno di accedere
+    # ai file dell'installer/gioco. Indipendente da HIDE_HOME.
+    BWRAP_ARGS+=(--bind "$EXE_DIR" "$EXE_DIR")
     echo ">> Avvio in sandbox: $EXE"
     [ "$NET_ISOLATED" -eq 1 ] && echo "   Rete: DISABILITATA" || echo "   Rete: ⚠️ ABILITATA (compatibilità)"
     [ "$HIDE_HOME" -eq 1 ] && echo "   Home: nascosta" || echo "   Home: ⚠️ visibile (compatibilità)"

@@ -895,17 +895,22 @@ class MainWindow(QMainWindow):
                 return
         self._save_settings_from_ui()
 
-    def _sandbox_env(self):
+    def _sandbox_env(self, overrides=None):
         """Costruisce l'ambiente QProcess con i toggle di sicurezza correnti."""
+        overrides = overrides or {}
         env = QProcessEnvironment.systemEnvironment()
-        env.insert("SANDBOX_HIDE_HOME", "1" if self.sec_hide_home.isChecked() else "0")
-        env.insert("SANDBOX_CAP_DROP", "1" if self.sec_cap_drop.isChecked() else "0")
-        env.insert("SANDBOX_UNSHARE_PID", "1" if self.sec_unshare_pid.isChecked() else "0")
-        env.insert("SANDBOX_DRI", "1" if self.sec_dri.isChecked() else "0")
-        env.insert("SANDBOX_AUDIO", "1" if self.sec_audio.isChecked() else "0")
-        env.insert("SANDBOX_ALLOW_LOOPBACK", "1" if self.sec_loopback.isChecked() else "0")
-        env.insert("SANDBOX_ALLOW_NETWORK", "1" if self.sec_allow_network.isChecked() else "0")
-        env.insert("SANDBOX_DISABLE_ZDRIVE", "1" if self.sec_disable_zdrive.isChecked() else "0")
+
+        def _val(key, checkbox):
+            return overrides.get(key) or ("1" if checkbox.isChecked() else "0")
+
+        env.insert("SANDBOX_HIDE_HOME", _val("SANDBOX_HIDE_HOME", self.sec_hide_home))
+        env.insert("SANDBOX_CAP_DROP", _val("SANDBOX_CAP_DROP", self.sec_cap_drop))
+        env.insert("SANDBOX_UNSHARE_PID", _val("SANDBOX_UNSHARE_PID", self.sec_unshare_pid))
+        env.insert("SANDBOX_DRI", _val("SANDBOX_DRI", self.sec_dri))
+        env.insert("SANDBOX_AUDIO", _val("SANDBOX_AUDIO", self.sec_audio))
+        env.insert("SANDBOX_ALLOW_LOOPBACK", _val("SANDBOX_ALLOW_LOOPBACK", self.sec_loopback))
+        env.insert("SANDBOX_ALLOW_NETWORK", _val("SANDBOX_ALLOW_NETWORK", self.sec_allow_network))
+        env.insert("SANDBOX_DISABLE_ZDRIVE", _val("SANDBOX_DISABLE_ZDRIVE", self.sec_disable_zdrive))
         return env
 
     def _browse_prefix_root(self):
@@ -1046,7 +1051,7 @@ class MainWindow(QMainWindow):
         systemd_args += ["--", wine_sandbox] + args
         return "systemd-run", systemd_args
 
-    def _run_process(self, args, on_finished=None):
+    def _run_process(self, args, on_finished=None, env_overrides=None):
         if self.process is not None and self.process.state() != QProcess.NotRunning:
             QMessageBox.warning(self, "Processo in corso",
                                  "C'è già un'operazione in esecuzione. Attendi che finisca.")
@@ -1056,7 +1061,7 @@ class MainWindow(QMainWindow):
         prefix_path = args[0] if args else None
         exe_path = args[1] if len(args) > 1 else None
 
-        env = self._sandbox_env()
+        env = self._sandbox_env(env_overrides)
         env_dict = {key: env.value(key) for key in env.keys() if key.startswith("SANDBOX_")}
 
         program, full_args = self._build_launch_argv(wine_program, wine_args, env_dict)
@@ -1206,7 +1211,11 @@ class MainWindow(QMainWindow):
                         save_json(GAMES_FILE, self.games)
                         self._refresh_game_list()
 
-        self._run_process([prefix, setup_exe], on_finished=after_install)
+        # Z: deve essere attiva durante l'installazione: Wine la usa per
+        # risolvere il path Unix del setup.exe (es. su disco USB).
+        # wine-sandbox la rimuoverà di nuovo quando si lancia il gioco sandboxed.
+        self._run_process([prefix, setup_exe], on_finished=after_install,
+                          env_overrides={"SANDBOX_DISABLE_ZDRIVE": "0"})
 
     # ------------------------------------------------------------------
     # Azioni tab Montaggio immagini
@@ -1621,8 +1630,62 @@ class MainWindow(QMainWindow):
         version_code = next(code for label, code in WINDOWS_VERSIONS if label == version_label)
 
         self._wine_log(f"Imposto versione Windows '{version_label}' ({version_code}) su {entry['path']}")
-        self._run_wine_tool(entry["path"], entry.get("arch", ""),
-                             "winecfg", ["/v", version_code], detached=False)
+
+        # winecfg /v non imposta affidabilmente la versione in Wine 10+.
+        # Scriviamo direttamente nel registry con reg add, poi wineboot -u
+        # per applicare i cambiamenti.
+        prefix_path = entry["path"]
+        arch = entry.get("arch", "")
+
+        if self.wine_tool_process is not None and self.wine_tool_process.state() != QProcess.NotRunning:
+            QMessageBox.warning(self, "Operazione in corso",
+                                 "C'è già un'operazione sul prefix in esecuzione. Attendi che finisca.")
+            return
+
+        self._ensure_z_drive(prefix_path)
+
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("WINEPREFIX", prefix_path)
+        if arch:
+            env.insert("WINEARCH", arch)
+
+        reg_cmd = ["wine", "reg", "add", "HKCU\\Software\\Wine",
+                   "/v", "Version", "/t", "REG_SZ", "/d", version_code, "/f"]
+
+        self._wine_log(f"$ {' '.join(reg_cmd)}")
+        self.wine_tool_process = QProcess(self)
+        self.wine_tool_process.setProcessEnvironment(env)
+        self.wine_tool_process.setProcessChannelMode(QProcess.MergedChannels)
+        self.wine_tool_process.readyReadStandardOutput.connect(self._on_wine_tool_output)
+
+        def after_reg(exit_code, status):
+            if exit_code == 0:
+                self._wine_log(f"Versione Windows impostata a '{version_code}'. Eseguo wineboot -u per applicare...")
+                boot_env = QProcessEnvironment.systemEnvironment()
+                boot_env.insert("WINEPREFIX", prefix_path)
+                if arch:
+                    boot_env.insert("WINEARCH", arch)
+                self.wine_tool_process = QProcess(self)
+                self.wine_tool_process.setProcessEnvironment(boot_env)
+                self.wine_tool_process.setProcessChannelMode(QProcess.MergedChannels)
+                self.wine_tool_process.readyReadStandardOutput.connect(self._on_wine_tool_output)
+                self.wine_tool_process.errorOccurred.connect(
+                    lambda err: self._wine_log(
+                        f"\n[ERRORE QProcess: {self.wine_tool_process.errorString()}]\n"))
+                self.wine_tool_process.finished.connect(
+                    lambda code, st: self._wine_log(
+                        f"\n[wineboot terminato con codice {code}]\n"
+                        + ("Versione Windows applicata con successo." if code == 0 else
+                           "ATTENZIONE: wineboot ha restituito un errore.")))
+                self.wine_tool_process.start("wineboot", ["-u"])
+            else:
+                self._wine_log(f"ERRORE: reg add ha fallito (codice {exit_code}).")
+
+        self.wine_tool_process.errorOccurred.connect(
+            lambda err: self._wine_log(
+                f"\n[ERRORE QProcess: {self.wine_tool_process.errorString()}]\n"))
+        self.wine_tool_process.finished.connect(after_reg)
+        self.wine_tool_process.start("wine", reg_cmd[1:])
 
     def _on_open_winecfg(self):
         entry = self._selected_prefix()
