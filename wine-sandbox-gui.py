@@ -1421,6 +1421,16 @@ class MainWindow(QMainWindow):
         entry = next((p for p in self.prefixes if p["name"] == choice), None)
         return entry["path"] if entry else None
 
+    def _remove_z_drive(self, prefix_path):
+        """Rimuove il symlink Z: da dosdevices (Wine lo ricrea a ogni wineboot)."""
+        z_link = os.path.join(prefix_path, "dosdevices", "z:")
+        if os.path.lexists(z_link):
+            try:
+                os.remove(z_link)
+                self._wine_log("Unità Z: rimossa (accesso alla radice bloccato).")
+            except OSError as e:
+                self._wine_log(f"ATTENZIONE: impossibile rimuovere Z: {e}")
+
     def _run_wine_tool(self, prefix_path, arch, program, args, blocking_log=True, detached=False):
         """Esegue un tool Wine (winecfg/wineboot/regedit) con WINEPREFIX (e
         WINEARCH solo se esplicitamente richiesto) impostati, DIRETTAMENTE
@@ -1431,13 +1441,26 @@ class MainWindow(QMainWindow):
             env.insert("WINEARCH", arch)
 
         if detached:
-            # winecfg/regedit sono GUI interattive: lanciale scollegate dal
-            # nostro QProcess principale, così non bloccano la finestra.
+            # winecfg/regedit sono GUI interattive: lanciale su un QProcess
+            # separato (non bloccano la finestra). Usiamo start() invece di
+            # startDetached() per poter ricevere il segnale finished e pulire
+            # il symlink Z: che Wine ricrea a ogni wineboot.
+            if not hasattr(self, "_detached_procs"):
+                self._detached_procs = []
             proc = QProcess(self)
             proc.setProcessEnvironment(env)
+            proc.setProcessChannelMode(QProcess.MergedChannels)
+            proc.readyReadStandardOutput.connect(self._on_wine_tool_output)
             proc.errorOccurred.connect(
                 lambda err: self._wine_log(f"\n[ERRORE avvio {program}: {proc.errorString()}]\n"))
-            proc.startDetached(program, args)
+            if self.sec_disable_zdrive.isChecked():
+                proc.finished.connect(
+                    lambda code, status: self._remove_z_drive(prefix_path))
+            proc.finished.connect(
+                lambda code, status: self._wine_log(f"\n[{program} terminato con codice {code}]\n"))
+            proc.finished.connect(lambda code, status: self._detached_procs.remove(proc))
+            self._detached_procs.append(proc)
+            proc.start(program, args)
             self._wine_log(f"$ {program} {' '.join(args)}  (avviato, finestra separata)")
             return
 
@@ -1520,13 +1543,7 @@ class MainWindow(QMainWindow):
                 self._wine_log("Prefix creato e registrato con successo.")
 
                 if self.sec_disable_zdrive.isChecked():
-                    z_link = os.path.join(prefix_path, "dosdevices", "z:")
-                    if os.path.lexists(z_link):
-                        try:
-                            os.remove(z_link)
-                            self._wine_log("Unità Z: rimossa (accesso alla radice bloccato).")
-                        except OSError as e:
-                            self._wine_log(f"ATTENZIONE: impossibile rimuovere Z: {e}")
+                    self._remove_z_drive(prefix_path)
             else:
                 self._wine_log(
                     f"ATTENZIONE: wineboot ha restituito codice {exit_code}. "
