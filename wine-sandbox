@@ -26,6 +26,11 @@
 #   SANDBOX_HIDE_HOME=0        Non nascondere la home (di default nascosta)
 #   SANDBOX_CAP_DROP=0         Non droppare le capability Linux (di default droppate)
 #   SANDBOX_UNSHARE_PID=0      Non isolare la visibilità dei processi (di default isolata)
+#   SANDBOX_UNSHARE_IPC=1      Isola i segmenti IPC condivisi (SysV shm/sem/msg) dal resto
+#                              del sistema. ⚠️ DISATTIVATO di default: rompe X11 MIT-SHM
+#                              (X_ShmPutImage) usato da moltissimi giochi, che crashano con
+#                              "Unhandled page fault". Attiva solo per giochi che non usano
+#                              MIT-SHM e di cui ti fidi ciecamente.
 #   SANDBOX_DRI=0              Non passare /dev/dri, niente accelerazione GPU (di default passato)
 #   SANDBOX_GPU_CAP_SYSADMIN=1 Espone /dev/dri/cardN intero (invece del solo
 #                              render node) e aggiunge CAP_SYS_ADMIN, necessario
@@ -141,6 +146,7 @@ fi
 HIDE_HOME="${SANDBOX_HIDE_HOME:-1}"
 CAP_DROP="${SANDBOX_CAP_DROP:-1}"
 UNSHARE_PID="${SANDBOX_UNSHARE_PID:-1}"
+UNSHARE_IPC="${SANDBOX_UNSHARE_IPC:-0}"
 ALLOW_DRI="${SANDBOX_DRI:-1}"
 GPU_CAP_SYSADMIN="${SANDBOX_GPU_CAP_SYSADMIN:-0}"
 ALLOW_AUDIO="${SANDBOX_AUDIO:-1}"
@@ -158,12 +164,20 @@ PULSE_SOCKET="/run/user/$(id -u)/pulse/native"
 PIPEWIRE_SOCKET="/run/user/$(id -u)/pipewire-0"
 
 BWRAP_ARGS+=(
-    --unshare-ipc
     --unshare-uts
     --unshare-cgroup-try
     --die-with-parent
     --new-session
 )
+
+# --unshare-ipc è DISATTIVATO di default: crea un namespace IPC separato, il che
+# spezza la memoria condivisa X11 MIT-SHM (X_ShmPutImage) usata da moltissimi giochi
+# via Wine per il trasferimento veloce dei frame. Con --unshare-ipc il server X
+# (che vive nel namespace dell'host) non vede i segmenti SysV del gioco → il gioco
+# riceve BadValue e crasha con "Unhandled page fault". Abilitalo (SANDBOX_UNSHARE_IPC=1)
+# solo per giochi che non usano X11 MIT-SHM e di cui ti fidi ciecamente: isola i
+# segmenti IPC condivisi dal resto del sistema, ma rompe molti titoli.
+[ "$UNSHARE_IPC" -eq 1 ] && BWRAP_ARGS+=(--unshare-ipc)
 
 [ "$UNSHARE_PID" -eq 1 ] && BWRAP_ARGS+=(--unshare-pid)
 if [ "$CAP_DROP" -eq 1 ]; then

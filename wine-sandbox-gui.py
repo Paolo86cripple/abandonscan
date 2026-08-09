@@ -75,6 +75,7 @@ DEFAULT_SETTINGS = {
     "sec_hide_home": True,
     "sec_cap_drop": True,
     "sec_unshare_pid": True,
+    "sec_unshare_ipc": False,
     "sec_dri": True,
     "sec_gpu_cap_sysadmin": False,
     "sec_audio": True,
@@ -858,6 +859,14 @@ class MainWindow(QMainWindow):
         self.sec_unshare_pid.stateChanged.connect(self._save_settings_from_ui)
         security_layout.addWidget(self.sec_unshare_pid)
 
+        self.sec_unshare_ipc = QCheckBox(
+            "  ⚠️ Isola anche i segmenti IPC condivisi (ROMpe X11 MIT-SHM usato da "
+            "molti giochi, che crashano - lascia DISATTIVATO a meno che un gioco non "
+            "lo richieda esplicitamente)")
+        self.sec_unshare_ipc.setChecked(False)
+        self.sec_unshare_ipc.stateChanged.connect(self._save_settings_from_ui)
+        security_layout.addWidget(self.sec_unshare_ipc)
+
         self.sec_dri = QCheckBox("Consenti GPU/accelerazione 3D (serve per la maggior parte dei giochi)")
         self.sec_dri.setChecked(True)
         self.sec_dri.stateChanged.connect(self._save_settings_from_ui)
@@ -1611,6 +1620,7 @@ class MainWindow(QMainWindow):
         self.settings["sec_hide_home"] = self.sec_hide_home.isChecked()
         self.settings["sec_cap_drop"] = self.sec_cap_drop.isChecked()
         self.settings["sec_unshare_pid"] = self.sec_unshare_pid.isChecked()
+        self.settings["sec_unshare_ipc"] = self.sec_unshare_ipc.isChecked()
         self.settings["sec_dri"] = self.sec_dri.isChecked()
         self.settings["sec_gpu_cap_sysadmin"] = self.sec_gpu_cap_sysadmin.isChecked()
         self.settings["sec_audio"] = self.sec_audio.isChecked()
@@ -1637,6 +1647,7 @@ class MainWindow(QMainWindow):
         self.sec_hide_home.setChecked(self.settings.get("sec_hide_home", True))
         self.sec_cap_drop.setChecked(self.settings.get("sec_cap_drop", True))
         self.sec_unshare_pid.setChecked(self.settings.get("sec_unshare_pid", True))
+        self.sec_unshare_ipc.setChecked(self.settings.get("sec_unshare_ipc", False))
         self.sec_dri.setChecked(self.settings.get("sec_dri", True))
         self.sec_gpu_cap_sysadmin.setChecked(self.settings.get("sec_gpu_cap_sysadmin", False))
         self.sec_audio.setChecked(self.settings.get("sec_audio", True))
@@ -1686,6 +1697,7 @@ class MainWindow(QMainWindow):
         env.insert("SANDBOX_HIDE_HOME", _val("SANDBOX_HIDE_HOME", self.sec_hide_home))
         env.insert("SANDBOX_CAP_DROP", _val("SANDBOX_CAP_DROP", self.sec_cap_drop))
         env.insert("SANDBOX_UNSHARE_PID", _val("SANDBOX_UNSHARE_PID", self.sec_unshare_pid))
+        env.insert("SANDBOX_UNSHARE_IPC", _val("SANDBOX_UNSHARE_IPC", self.sec_unshare_ipc))
         env.insert("SANDBOX_DRI", _val("SANDBOX_DRI", self.sec_dri))
         env.insert("SANDBOX_GPU_CAP_SYSADMIN", _val("SANDBOX_GPU_CAP_SYSADMIN", self.sec_gpu_cap_sysadmin))
         env.insert("SANDBOX_AUDIO", _val("SANDBOX_AUDIO", self.sec_audio))
@@ -1777,6 +1789,7 @@ class MainWindow(QMainWindow):
             "hide_home": self.sec_hide_home.isChecked(),
             "cap_drop": self.sec_cap_drop.isChecked(),
             "unshare_pid": self.sec_unshare_pid.isChecked(),
+            "unshare_ipc": self.sec_unshare_ipc.isChecked(),
             "dri": self.sec_dri.isChecked(),
             "gpu_cap_sysadmin": self.sec_gpu_cap_sysadmin.isChecked(),
             "audio": self.sec_audio.isChecked(),
