@@ -298,16 +298,20 @@ BWRAP_ARGS+=(
 # Masking di file sensibili in /proc.
 # I FILE (kcore, kallsyms, sysrq-trigger) vanno mascherati con --ro-bind
 # /dev/null (tmpfs non funziona su un file). Le DIRECTORY (bus, scsi) con tmpfs.
+# I file che potrebbero non esistere su tutti i kernel (config.gz, sched_debug,
+# modules) vanno verificati con test -e prima del bind: --ro-bind-try non aiuta
+# perché controlla l'esistenza della sorgente, non della destinazione.
 BWRAP_ARGS+=(
     --ro-bind /dev/null /proc/kcore
     --ro-bind /dev/null /proc/kallsyms
     --ro-bind /dev/null /proc/sysrq-trigger
-    --ro-bind-try /dev/null /proc/modules
-    --ro-bind-try /dev/null /proc/config.gz
-    --ro-bind-try /dev/null /proc/sched_debug
     --tmpfs /proc/bus
     --tmpfs /proc/scsi
 )
+# File /proc opzionali (dipendono dalla configurazione del kernel)
+[ -e /proc/modules ] && BWRAP_ARGS+=(--ro-bind /dev/null /proc/modules)
+[ -e /proc/config.gz ] && BWRAP_ARGS+=(--ro-bind /dev/null /proc/config.gz)
+[ -e /proc/sched_debug ] && BWRAP_ARGS+=(--ro-bind /dev/null /proc/sched_debug)
 
 # /proc/sys in sola lettura (contiene parametri kernel tweakabili)
 BWRAP_ARGS+=(--ro-bind /proc/sys /proc/sys)
