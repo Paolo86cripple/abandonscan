@@ -207,6 +207,12 @@ if [ "$X11_FALLBACK" -eq 1 ]; then
     WAYLAND_ONLY=0
     UNSHARE_IPC=0
 fi
+# --setup (winetricks): tool fidato, ma è una GUI GDI non supportata dal driver
+# Wayland nativo. Forziamo X11 automaticamente senza bisogno di toggle manuale.
+if [ "$SETUP_MODE" -eq 1 ] && [ "$WAYLAND_ONLY" -eq 1 ]; then
+    WAYLAND_ONLY=0
+    UNSHARE_IPC=0
+fi
 ALLOW_DRI="${SANDBOX_DRI:-1}"
 GPU_CAP_SYSADMIN="${SANDBOX_GPU_CAP_SYSADMIN:-0}"
 ALLOW_AUDIO="${SANDBOX_AUDIO:-1}"
