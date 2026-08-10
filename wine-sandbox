@@ -75,6 +75,11 @@
 #                              (di default sola lettura). I giochi abandonware
 #                              spesso salvano i salvataggi accanto all'exe;
 #                              attiva solo se il gioco non salva nel prefix.
+#   SANDBOX_GAMEPAD=0          Non esporre i device di input (/dev/input e
+#                              /run/udev/data). Di default ON (1): i gamepad
+#                              sono dispositivi di input come tastiera/mouse,
+#                              già accessibili via Wayland/X11. Serve per
+#                              l'enumerazione device via evdev/SDL2/libudev.
 #
 # HARDENING SEMPRE ATTIVO (non disattivabile, nessun impatto sui giochi):
 #   --unshare-cgroup-try  Isola la vista dei cgroup (nessun gioco ne ha bisogno)
@@ -190,6 +195,7 @@ ALLOW_LOOPBACK="${SANDBOX_ALLOW_LOOPBACK:-0}"
 ALLOW_NETWORK="${SANDBOX_ALLOW_NETWORK:-0}"
 DISABLE_ZDRIVE="${SANDBOX_DISABLE_ZDRIVE:-1}"
 EXE_RW="${SANDBOX_EXE_RW:-0}"
+GAMEPAD="${SANDBOX_GAMEPAD:-1}"
 
 if [ "$DISABLE_ZDRIVE" -eq 1 ] && [ -e "$WINEPFX/dosdevices/z:" ]; then
     rm -f "$WINEPFX/dosdevices/z:"
@@ -299,6 +305,15 @@ if [ "$ALLOW_DRI" -eq 1 ]; then
             [ -e "$node" ] && BWRAP_ARGS+=(--dev-bind-try "$node" "$node")
         done
     fi
+fi
+
+# Gamepad e dispositivi di input: /dev/input (evdev + joystick legacy) per
+# SDL2/Wine; /run/udev/data per l'enumerazione device via libudev (metadati
+# vendor/prodotto). I gamepad sono dispositivi di input al pari di
+# tastiera/mouse, già accessibili via Wayland/X11: default ON.
+if [ "$GAMEPAD" -eq 1 ]; then
+    [ -d /dev/input ] && BWRAP_ARGS+=(--dev-bind-try /dev/input /dev/input)
+    [ -d /run/udev/data ] && BWRAP_ARGS+=(--ro-bind-try /run/udev/data /run/udev/data)
 fi
 
 # NOTA: /sys (inclusi /sys/class/drm e /sys/dev/char per l'enumerazione GPU
