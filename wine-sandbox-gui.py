@@ -2749,6 +2749,21 @@ class MainWindow(QMainWindow):
             "Chiudi l'installer al termine per continuare."
         )
 
+        # Se Wayland-only è attivo, chiedi se attivare X11 fallback per l'installer.
+        # Gli installer abandonware usano quasi sempre finestre GDI, non supportate
+        # dal driver Wayland nativo → senza X11 l'installer crasha (nodrv_CreateWindow).
+        force_x11 = False
+        if self.sec_wayland_only.isChecked() and not self.sec_x11_fallback.isChecked():
+            reply = QMessageBox.question(
+                self, "Installer GDI e Wayland",
+                "Con il driver Wayland nativo attivo, gli installer che usano finestre "
+                "GDI (la maggior parte degli installer abandonware) potrebbero non "
+                "funzionare.\n\n"
+                "Attivare temporaneamente X11/XWayland SOLO per questa installazione?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+            )
+            force_x11 = (reply == QMessageBox.Yes)
+
         def after_install(exit_code):
             reply = QMessageBox.question(
                 self, "Installazione completata",
@@ -2769,7 +2784,9 @@ class MainWindow(QMainWindow):
 
         # Modalità --install: Z: abilitata in sola lettura, EXE_DIR read-only,
         # tutto il filesystem in sola lettura, scrittura solo nel prefix.
-        self._run_process(["--install", prefix, setup_exe], on_finished=after_install)
+        env_overrides = {"SANDBOX_X11_FALLBACK": "1"} if force_x11 else {}
+        self._run_process(["--install", prefix, setup_exe], on_finished=after_install,
+                          env_overrides=env_overrides)
 
     # ------------------------------------------------------------------
     # Azioni tab Montaggio immagini
