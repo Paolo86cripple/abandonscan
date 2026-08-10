@@ -3188,6 +3188,8 @@ class MainWindow(QMainWindow):
         self.wine_tool_process.start(program, args)
 
     def _on_wine_tool_output(self):
+        if self.wine_tool_process is None:
+            return
         data = self.wine_tool_process.readAllStandardOutput().data().decode(errors="replace")
         self.wine_tool_log.moveCursor(QTextCursor.MoveOperation.End)
         self.wine_tool_log.insertPlainText(data)
@@ -3428,7 +3430,7 @@ class MainWindow(QMainWindow):
             return
         ws_program, ws_args = self._wine_sandbox_launch_cmd(["--setup", entry["path"], "--gui"])
         self._wine_log(f"\n$ {ws_program} {' '.join(ws_args)}\n")
-        self._run_wine_tool(entry["path"], entry.get("arch", ""), ws_program, ws_args[1:], detached=True)
+        self._run_wine_tool(entry["path"], entry.get("arch", ""), ws_program, ws_args, detached=True)
 
     def _on_run_standalone(self):
         """Esegue un eseguibile Windows scelto dall'utente con il prefix
