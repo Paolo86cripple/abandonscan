@@ -2319,6 +2319,7 @@ class MainWindow(QMainWindow):
         self._wine_log(f"$ {ws_program} {' '.join(ws_args)}")
 
         self.wine_tool_process = QProcess(self)
+        self.wine_tool_process.setProcessEnvironment(self._sandbox_env())
         self.wine_tool_process.setProcessChannelMode(QProcess.MergedChannels)
         self.wine_tool_process.readyReadStandardOutput.connect(self._on_wine_tool_output)
         self.wine_tool_process.errorOccurred.connect(
@@ -3355,6 +3356,7 @@ class MainWindow(QMainWindow):
             return
 
         self.wine_tool_process = QProcess(self)
+        self.wine_tool_process.setProcessEnvironment(self._sandbox_env())
         self.wine_tool_process.setProcessChannelMode(QProcess.MergedChannels)
         self.wine_tool_process.readyReadStandardOutput.connect(self._on_wine_tool_output)
         self.wine_tool_process.errorOccurred.connect(
