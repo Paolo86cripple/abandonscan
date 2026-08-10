@@ -197,3 +197,5 @@ comportamentale Falcon Sandbox (Hybrid Analysis, env Windows 7 32-bit).
 ```bash
 python3 wine-sandbox-gui.py
 ```
+
+**Regola**: ogni modifica va applicata sia al repo (`/run/media/paolo/Data/repos/abandonscan/`) che alla copia funzionante (`/run/media/paolo/Data/Apps/wine-sandbox-gui/`). I due percorsi vanno sempre mantenuti sincronizzati.
