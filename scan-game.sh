@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # scan-game.sh - scarica (o usa un file già locale), estrae ricorsivamente
-# archivi e immagini ottiche, scansiona tutto con ClamAV e verifica su
-# VirusTotal.
+# archivi e immagini ottiche, verifica su VirusTotal (70+ motori) e,
+# se trovati positivi, analisi comportamentale Falcon Sandbox.
 #
 # Sorgenti supportate:
 #   - URL diretti (http/https)      -> scaricati con curl
@@ -175,18 +175,12 @@ else
 fi
 
 echo ""
-echo "== 3/5: Scansione ClamAV ricorsiva (originale + tutto l'estratto) =="
-command -v clamscan &>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq clamav && sudo freshclam --quiet; }
-CLAMAV_RESULT="$(clamscan -r --no-summary "$WORKDIR" 2>&1 || true)"
-echo "$CLAMAV_RESULT"
-
-echo ""
-echo "== 4/5: Calcolo hash SHA256 (file originale) =="
+echo "== 3/5: Calcolo hash SHA256 (file originale) =="
 SHA256="$(sha256sum "$WORKDIR/$FILENAME" | cut -d' ' -f1)"
 echo "SHA256: $SHA256"
 
 echo ""
-echo "== 5/5: Verifica su VirusTotal =="
+echo "== 4/5: Verifica su VirusTotal (70+ motori) =="
 if [ -z "${VT_API_KEY:-}" ]; then
     echo "ATTENZIONE: VT_API_KEY non impostata, salto il controllo VirusTotal."
 else
@@ -214,7 +208,7 @@ else
 
         if [ "${MALICIOUS:-0}" -gt 0 ] || [ "${SUSPICIOUS:-0}" -gt 0 ]; then
             echo ""
-            echo "== 6/6: VirusTotal ha segnalato positivi, avvio analisi comportamentale Falcon Sandbox =="
+            echo "== 5/5: VirusTotal ha segnalato positivi, avvio analisi comportamentale Falcon Sandbox =="
             if [ -z "${FALCON_API_KEY:-}" ]; then
                 echo "ATTENZIONE: FALCON_API_KEY non impostata, salto l'analisi Falcon Sandbox."
                 echo "Imposta il secret nel Codespace per abilitarla in questi casi."
@@ -252,6 +246,5 @@ echo "Archivio/file originale: $WORKDIR/$FILENAME"
 if [ "$FOUND_EXTRACTED" -gt 0 ]; then
     echo "File estratti: $FOUND_EXTRACTED (vedi elenco sopra)"
 fi
-echo "ClamAV: $([ -z "$CLAMAV_RESULT" ] && echo 'nessuna minaccia rilevata su nulla, incluso il contenuto estratto' || echo "$CLAMAV_RESULT")"
 echo ""
 echo "Se tutto pulito, scarica l'intera cartella $WORKDIR dal Codespace con l'esploratore VS Code (tasto destro > Download)."

@@ -9,7 +9,7 @@ Sezioni:
   - Immagini ottiche: montaggio ISO/IMG/NRG/BIN+CUE senza sudo (udisksctl)
   - Prefix Wine: creazione prefix, versione Windows, winecfg/regedit/winetricks,
     esecuzione di eseguibili standalone in sandbox
-  - Scansione: scansione malware opzionale di un file (ClamAV locale, VirusTotal,
+  - Scansione: scansione malware opzionale di un file (VirusTotal 70+ motori,
     Hybrid Analysis/Falcon Sandbox) a piacimento
   - Sistema: dipendenze, integrazione desktop, backup
 
@@ -88,8 +88,7 @@ DEFAULT_SETTINGS = {
     "sec_exe_rw": False,
     "sec_virtual_desktop": False,
     "winecfg_ensure_zdrive": True,
-    "scan_use_clamav": True,
-    "scan_use_virustotal": False,
+    "scan_use_virustotal": True,
     "scan_use_falcon": False,
     "virustotal_api_key": "",
     "falcon_api_key": "",
@@ -545,17 +544,16 @@ SCAN_STATUS_SKIPPED = "skipped"
 
 class ScanThread(QThread):
     """Scansiona un file (es. un installer) a piacimento, in background:
-    1) ClamAV locale (se installato), 2) VirusTotal (hash o upload),
-    3) Hybrid Analysis/Falcon Sandbox (solo se VirusTotal segnala positivi).
+    1) VirusTotal (70+ motori, hash o upload),
+    2) Hybrid Analysis/Falcon Sandbox (solo se VirusTotal segnala positivi).
     Nessuna scansione è automatica o bloccante."""
     log = Signal(str)
     finished = Signal(dict)
 
-    def __init__(self, filepath, use_clamav=True, use_virustotal=False,
-                 use_falcon=False, vt_api_key="", falcon_api_key=""):
+    def __init__(self, filepath, use_virustotal=True, use_falcon=False,
+                 vt_api_key="", falcon_api_key=""):
         super().__init__()
         self.filepath = filepath
-        self.use_clamav = use_clamav
         self.use_virustotal = use_virustotal
         self.use_falcon = use_falcon
         self.vt_api_key = vt_api_key
@@ -565,7 +563,6 @@ class ScanThread(QThread):
         result = {
             "file": self.filepath,
             "sha256": None,
-            "clamav": {"status": SCAN_STATUS_SKIPPED, "detail": ""},
             "virustotal": {"status": SCAN_STATUS_SKIPPED, "detail": "",
                            "malicious": 0, "suspicious": 0, "harmless": 0,
                            "undetected": 0, "report_url": None, "analysis_id": None},
@@ -578,9 +575,6 @@ class ScanThread(QThread):
             result["sha256"] = sha256
             self.log.emit(f"SHA256: {sha256}")
 
-            if self.use_clamav:
-                self._run_clamav(result)
-
             if self.use_virustotal and self.vt_api_key:
                 self._run_virustotal(result)
 
@@ -592,7 +586,7 @@ class ScanThread(QThread):
 
             self.finished.emit(result)
         except Exception as e:
-            result["clamav"]["status"] = "error"
+            result["virustotal"]["status"] = "error"
             self.log.emit(f"ERRORE durante la scansione: {e}")
             self.finished.emit(result)
 
@@ -603,30 +597,6 @@ class ScanThread(QThread):
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
                 h.update(chunk)
         return h.hexdigest()
-
-    def _run_clamav(self, result):
-        clamscan = shutil.which("clamscan")
-        if not clamscan:
-            result["clamav"]["status"] = "skipped"
-            result["clamav"]["detail"] = "clamscan non trovato sul sistema, ClamAV saltato."
-            self.log.emit(result["clamav"]["detail"])
-            return
-        self.log.emit(f"Avvio clamscan su: {self.filepath}")
-        proc = subprocess.run(
-            [clamscan, "--no-summary", "--infected", self.filepath],
-            capture_output=True, text=True)
-        output = (proc.stdout + proc.stderr).strip()
-        found = [line for line in output.splitlines() if line.strip().endswith("FOUND")]
-        if found:
-            result["clamav"]["status"] = "infected"
-            result["clamav"]["detail"] = "\n".join(found)
-        elif "OK" in output or proc.returncode in (0,):
-            result["clamav"]["status"] = "ok"
-            result["clamav"]["detail"] = "Nessuna minaccia rilevata."
-        else:
-            result["clamav"]["status"] = "ok"
-            result["clamav"]["detail"] = output or "Nessuna minaccia rilevata."
-        self.log.emit(f"ClamAV: {result['clamav']['detail']}")
 
     def _run_virustotal(self, result):
         self.log.emit("Interrogo VirusTotal (hash)...")
@@ -1370,14 +1340,8 @@ class MainWindow(QMainWindow):
         tools_box = QGroupBox("Tool di scansione")
         tools_layout = QVBoxLayout(tools_box)
 
-        self.scan_use_clamav_cb = QCheckBox(
-            "ClamAV locale (se installato - scansione istantanea, offline, gratuita)")
-        self.scan_use_clamav_cb.setChecked(True)
-        self.scan_use_clamav_cb.stateChanged.connect(self._save_settings_from_ui)
-        tools_layout.addWidget(self.scan_use_clamav_cb)
-
-        self.scan_use_vt_cb = QCheckBox("VirusTotal (hash + upload, richiede API key gratuita)")
-        self.scan_use_vt_cb.setChecked(False)
+        self.scan_use_vt_cb = QCheckBox("VirusTotal (70+ motori, richiede API key gratuita)")
+        self.scan_use_vt_cb.setChecked(True)
         self.scan_use_vt_cb.stateChanged.connect(self._save_settings_from_ui)
         tools_layout.addWidget(self.scan_use_vt_cb)
 
@@ -1544,15 +1508,6 @@ class MainWindow(QMainWindow):
             location = f" ({found_path})" if found_path else ""
             item = QListWidgetItem(f"{status}  —  {tool}: {description}{location}")
             self.deps_status_list.addItem(item)
-
-        clamav_path = shutil.which("clamscan")
-        if clamav_path:
-            item = QListWidgetItem(f"✅ trovato ({clamav_path})  —  clamscan: scansione malware locale (opzionale)")
-        else:
-            item = QListWidgetItem(
-                "⚪ opzionale (non installato)  —  clamscan: scansione malware locale. "
-                "Su CachyOS/Arch: sudo pacman -S clamav && sudo freshclam")
-        self.deps_status_list.addItem(item)
 
         missing = [tool for tool, _ in REQUIRED_TOOLS if not shutil.which(tool)]
         if missing:
@@ -1729,7 +1684,6 @@ class MainWindow(QMainWindow):
         self.settings["sec_disable_zdrive"] = self.sec_disable_zdrive.isChecked()
         self.settings["sec_exe_rw"] = self.sec_exe_rw.isChecked()
         self.settings["winecfg_ensure_zdrive"] = self.winecfg_ensure_zdrive_cb.isChecked()
-        self.settings["scan_use_clamav"] = self.scan_use_clamav_cb.isChecked()
         self.settings["scan_use_virustotal"] = self.scan_use_vt_cb.isChecked()
         self.settings["scan_use_falcon"] = self.scan_use_falcon_cb.isChecked()
         self.settings["virustotal_api_key"] = self.vt_api_key_edit.text().strip()
@@ -1767,8 +1721,7 @@ class MainWindow(QMainWindow):
         self.sec_disable_zdrive.setChecked(self.settings.get("sec_disable_zdrive", True))
         self.sec_exe_rw.setChecked(self.settings.get("sec_exe_rw", False))
         self.winecfg_ensure_zdrive_cb.setChecked(self.settings.get("winecfg_ensure_zdrive", True))
-        self.scan_use_clamav_cb.setChecked(self.settings.get("scan_use_clamav", True))
-        self.scan_use_vt_cb.setChecked(self.settings.get("scan_use_virustotal", False))
+        self.scan_use_vt_cb.setChecked(self.settings.get("scan_use_virustotal", True))
         self.scan_use_falcon_cb.setChecked(self.settings.get("scan_use_falcon", False))
         self.vt_api_key_edit.setText(self.settings.get("virustotal_api_key", ""))
         self.falcon_api_key_edit.setText(self.settings.get("falcon_api_key", ""))
@@ -2614,8 +2567,7 @@ class MainWindow(QMainWindow):
 
         thread = ScanThread(
             filepath,
-            use_clamav=self.settings.get("scan_use_clamav", True),
-            use_virustotal=self.settings.get("scan_use_virustotal", False),
+            use_virustotal=self.settings.get("scan_use_virustotal", True),
             use_falcon=self.settings.get("scan_use_falcon", False),
             vt_api_key=self.settings.get("virustotal_api_key", ""),
             falcon_api_key=self.settings.get("falcon_api_key", ""),
@@ -2634,17 +2586,6 @@ class MainWindow(QMainWindow):
         lines.append(f"File: {os.path.basename(filepath)}")
         lines.append(f"SHA256: {sha256}")
         lines.append("")
-
-        clamav = result["clamav"]
-        clamav_label = {
-            "ok": "✅ Pulito",
-            "infected": "⚠️ MINACCIA RILEVATA",
-            "error": "❌ Errore",
-            "skipped": "⚪ Non eseguita",
-        }.get(clamav["status"], clamav["status"])
-        lines.append(f"ClamAV: {clamav_label}")
-        if clamav["detail"]:
-            lines.append(f"  {clamav['detail']}")
 
         vt = result["virustotal"]
         if vt["status"] == "clean":
@@ -2671,8 +2612,7 @@ class MainWindow(QMainWindow):
             lines.append("")
             lines.append(f"Hybrid Analysis: ❌ {falcon['detail']}")
 
-        is_threat = (clamav.get("status") == "infected"
-                     or vt.get("status") == "flagged")
+        is_threat = vt.get("status") == "flagged"
         msg = QMessageBox(self)
         msg.setWindowTitle("Risultato scansione")
         msg.setText("\n".join(lines))
@@ -2703,11 +2643,10 @@ class MainWindow(QMainWindow):
         """Aggiunge una voce allo storico scansioni della tab Scansione."""
         if not hasattr(self, "scan_history_list"):
             return
-        clamav = result.get("clamav", {})
         vt = result.get("virustotal", {})
-        if clamav.get("status") == "infected" or vt.get("status") == "flagged":
+        if vt.get("status") == "flagged":
             badge = "⚠️"
-        elif clamav.get("status") == "ok" or vt.get("status") == "clean":
+        elif vt.get("status") == "clean":
             badge = "✅"
         else:
             badge = "⚪"
@@ -2728,8 +2667,7 @@ class MainWindow(QMainWindow):
         # Scansione malware opzionale (a piacimento, non bloccante): se abilitata
         # nelle impostazioni, chiede se si vuole scansionare il file prima di
         # installarlo; l'utente può sempre saltare e procedere.
-        if (self.settings.get("scan_use_clamav", True)
-                or self.settings.get("scan_use_virustotal", False)
+        if (self.settings.get("scan_use_virustotal", True)
                 or self.settings.get("scan_use_falcon", False)):
             reply = QMessageBox.question(
                 self, "Scansione malware (opzionale)",
