@@ -86,6 +86,11 @@
 #                              sono dispositivi di input come tastiera/mouse,
 #                              già accessibili via Wayland/X11. Serve per
 #                              l'enumerazione device via evdev/SDL2/libudev.
+#   SANDBOX_VIRTUAL_DESKTOP=1  Avvia il gioco in un desktop virtuale Wine
+#                              (finestra invece di fullscreen). Utile per
+#                              giochi che bloccano lo schermo con schermo nero
+#                              o per debug. Risoluzione controllabile via
+#                              SANDBOX_VIRTUAL_DESKTOP_SIZE (default 1280x720).
 #
 # HARDENING SEMPRE ATTIVO (non disattivabile, nessun impatto sui giochi):
 #   --unshare-cgroup-try  Isola la vista dei cgroup (nessun gioco ne ha bisogno)
@@ -221,6 +226,8 @@ ALLOW_NETWORK="${SANDBOX_ALLOW_NETWORK:-0}"
 DISABLE_ZDRIVE="${SANDBOX_DISABLE_ZDRIVE:-1}"
 EXE_RW="${SANDBOX_EXE_RW:-0}"
 GAMEPAD="${SANDBOX_GAMEPAD:-1}"
+VIRTUAL_DESKTOP="${SANDBOX_VIRTUAL_DESKTOP:-0}"
+VIRTUAL_DESKTOP_SIZE="${SANDBOX_VIRTUAL_DESKTOP_SIZE:-1280x720}"
 
 # Runtime Wine personalizzato (Proton/Proton-CachyOS): override wine/wineserver
 # e prepende le librerie del runtime a LD_LIBRARY_PATH (necessarie per trovare
@@ -528,9 +535,18 @@ else
         # Attiva l'interfaccia di loopback nel nuovo network namespace (nessun
         # accesso a internet, ma localhost funziona per giochi che usano
         # socket locali per componenti interni - es. alcuni motori audio/video)
-        exec bwrap "${BWRAP_ARGS[@]}" "${COMMON_ENV[@]}" \
-            sh -c 'ip link set lo up 2>/dev/null; exec wine "$0" "$@"' "$EXE" "$@"
+        if [ "$VIRTUAL_DESKTOP" -eq 1 ]; then
+            exec bwrap "${BWRAP_ARGS[@]}" "${COMMON_ENV[@]}" \
+                sh -c 'ip link set lo up 2>/dev/null; exec wine explorer /desktop=abandonscan,'"$VIRTUAL_DESKTOP_SIZE"' "$0" "$@"' "$EXE" "$@"
+        else
+            exec bwrap "${BWRAP_ARGS[@]}" "${COMMON_ENV[@]}" \
+                sh -c 'ip link set lo up 2>/dev/null; exec wine "$0" "$@"' "$EXE" "$@"
+        fi
     else
-        exec bwrap "${BWRAP_ARGS[@]}" "${COMMON_ENV[@]}" wine "$EXE" "$@"
+        if [ "$VIRTUAL_DESKTOP" -eq 1 ]; then
+            exec bwrap "${BWRAP_ARGS[@]}" "${COMMON_ENV[@]}" wine explorer /desktop=abandonscan,"$VIRTUAL_DESKTOP_SIZE" "$EXE" "$@"
+        else
+            exec bwrap "${BWRAP_ARGS[@]}" "${COMMON_ENV[@]}" wine "$EXE" "$@"
+        fi
     fi
 fi

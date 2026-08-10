@@ -86,6 +86,7 @@ DEFAULT_SETTINGS = {
     "sec_allow_network": False,
     "sec_disable_zdrive": True,
     "sec_exe_rw": False,
+    "sec_virtual_desktop": False,
     "winecfg_ensure_zdrive": True,
     "scan_use_clamav": True,
     "scan_use_virustotal": False,
@@ -936,6 +937,11 @@ class MainWindow(QMainWindow):
         self.sec_gamepad.stateChanged.connect(self._save_settings_from_ui)
         security_layout.addWidget(self.sec_gamepad)
 
+        self.sec_virtual_desktop = QCheckBox("Avvia in finestra virtuale (desktop Wine, per debug/schermo nero)")
+        self.sec_virtual_desktop.setChecked(False)
+        self.sec_virtual_desktop.stateChanged.connect(self._save_settings_from_ui)
+        security_layout.addWidget(self.sec_virtual_desktop)
+
         self.sec_allow_network = QCheckBox(
             "⚠️ Abilita rete internet (disattiva la protezione principale, usa solo se necessario)")
         self.sec_allow_network.setChecked(False)
@@ -1717,6 +1723,7 @@ class MainWindow(QMainWindow):
         self.settings["sec_gpu_cap_sysadmin"] = self.sec_gpu_cap_sysadmin.isChecked()
         self.settings["sec_audio"] = self.sec_audio.isChecked()
         self.settings["sec_gamepad"] = self.sec_gamepad.isChecked()
+        self.settings["sec_virtual_desktop"] = self.sec_virtual_desktop.isChecked()
         self.settings["sec_loopback"] = self.sec_loopback.isChecked()
         self.settings["sec_allow_network"] = self.sec_allow_network.isChecked()
         self.settings["sec_disable_zdrive"] = self.sec_disable_zdrive.isChecked()
@@ -1754,6 +1761,7 @@ class MainWindow(QMainWindow):
         self.sec_gpu_cap_sysadmin.setChecked(self.settings.get("sec_gpu_cap_sysadmin", False))
         self.sec_audio.setChecked(self.settings.get("sec_audio", True))
         self.sec_gamepad.setChecked(self.settings.get("sec_gamepad", True))
+        self.sec_virtual_desktop.setChecked(self.settings.get("sec_virtual_desktop", False))
         self.sec_loopback.setChecked(self.settings.get("sec_loopback", False))
         self.sec_allow_network.setChecked(self.settings.get("sec_allow_network", False))
         self.sec_disable_zdrive.setChecked(self.settings.get("sec_disable_zdrive", True))
@@ -1873,6 +1881,7 @@ class MainWindow(QMainWindow):
         env.insert("SANDBOX_GPU_CAP_SYSADMIN", _val("SANDBOX_GPU_CAP_SYSADMIN", self.sec_gpu_cap_sysadmin))
         env.insert("SANDBOX_AUDIO", _val("SANDBOX_AUDIO", self.sec_audio))
         env.insert("SANDBOX_GAMEPAD", _val("SANDBOX_GAMEPAD", self.sec_gamepad))
+        env.insert("SANDBOX_VIRTUAL_DESKTOP", _val("SANDBOX_VIRTUAL_DESKTOP", self.sec_virtual_desktop))
         env.insert("SANDBOX_ALLOW_LOOPBACK", _val("SANDBOX_ALLOW_LOOPBACK", self.sec_loopback))
         env.insert("SANDBOX_ALLOW_NETWORK", _val("SANDBOX_ALLOW_NETWORK", self.sec_allow_network))
         env.insert("SANDBOX_DISABLE_ZDRIVE", _val("SANDBOX_DISABLE_ZDRIVE", self.sec_disable_zdrive))
@@ -2072,6 +2081,7 @@ class MainWindow(QMainWindow):
             "gpu_cap_sysadmin": self.sec_gpu_cap_sysadmin.isChecked(),
             "audio": self.sec_audio.isChecked(),
             "gamepad": self.sec_gamepad.isChecked(),
+            "virtual_desktop": self.sec_virtual_desktop.isChecked(),
             "loopback": self.sec_loopback.isChecked(),
             "allow_network": self.sec_allow_network.isChecked(),
             "disable_zdrive": self.sec_disable_zdrive.isChecked(),
