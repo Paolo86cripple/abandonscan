@@ -290,6 +290,7 @@ BWRAP_ARGS+=(
     --ro-bind /etc /etc
     --ro-bind /lib /lib
     --ro-bind-try /lib64 /lib64
+    --symlink usr/lib32 /lib32
     --ro-bind-try /opt /opt
     --symlink /usr/bin /bin
     --proc /proc
