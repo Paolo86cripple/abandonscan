@@ -151,7 +151,8 @@ elif [[ "$INPUT" == http://* || "$INPUT" == https://* ]]; then
     echo "Rilevato URL diretto"
     cd "$WORKDIR"
     FILENAME="$(basename "$INPUT" | sed 's/%20/ /g; s/%28/(/g; s/%29/)/g')"
-    curl -sSL -o "$FILENAME" "$INPUT"
+    curl -# -L -o "$FILENAME" "$INPUT"
+    echo ""
     cd - > /dev/null
 
 else
