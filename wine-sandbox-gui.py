@@ -100,6 +100,9 @@ DEFAULT_SETTINGS = {
     "unmount_on_exit": True,
     "bchunk_output_dir": "",
     "dgvoodoo_version": "v2.52",
+    "wine_runtime": "proton-cachyos-native",
+    "proton_use_wined3d": False,
+    "proton_dxvk_d3d8": False,
 }
 
 WINDOWS_VERSIONS = [
@@ -987,6 +990,29 @@ class MainWindow(QMainWindow):
         security_scroll.setMinimumHeight(160)
         left_layout.addWidget(security_scroll)
 
+        # ---------- Selettore runtime Wine ----------
+        runtime_box = QGroupBox("Runtime Wine")
+        runtime_layout = QVBoxLayout(runtime_box)
+        runtime_row = QHBoxLayout()
+        runtime_row.addWidget(QLabel("Wine:"))
+        self.runtime_combo = QComboBox()
+        self._populate_runtime_combo()
+        self.runtime_combo.currentIndexChanged.connect(self._on_runtime_changed)
+        runtime_row.addWidget(self.runtime_combo, stretch=1)
+        runtime_layout.addLayout(runtime_row)
+
+        self.proton_wined3d_cb = QCheckBox("Usa OpenGL invece di DXVK (PROTON_USE_WINED3D)")
+        self.proton_wined3d_cb.setChecked(bool(self.settings.get("proton_use_wined3d", False)))
+        self.proton_wined3d_cb.stateChanged.connect(self._on_proton_option_changed)
+        runtime_layout.addWidget(self.proton_wined3d_cb)
+
+        self.proton_dxvk_d3d8_cb = QCheckBox("Traduci DirectX 8 via DXVK (PROTON_DXVK_D3D8, alternativa a dgVoodoo2)")
+        self.proton_dxvk_d3d8_cb.setChecked(bool(self.settings.get("proton_dxvk_d3d8", False)))
+        self.proton_dxvk_d3d8_cb.stateChanged.connect(self._on_proton_option_changed)
+        runtime_layout.addWidget(self.proton_dxvk_d3d8_cb)
+
+        left_layout.addWidget(runtime_box)
+
         left_layout.addWidget(QLabel(""))
         left_layout.addWidget(QLabel("Nuova installazione:"))
 
@@ -1849,8 +1875,12 @@ class MainWindow(QMainWindow):
         env.insert("SANDBOX_ALLOW_NETWORK", _val("SANDBOX_ALLOW_NETWORK", self.sec_allow_network))
         env.insert("SANDBOX_DISABLE_ZDRIVE", _val("SANDBOX_DISABLE_ZDRIVE", self.sec_disable_zdrive))
         env.insert("SANDBOX_EXE_RW", _val("SANDBOX_EXE_RW", self.sec_exe_rw))
-        return env
 
+        # Opzioni runtime Proton (solo se il runtime lo supporta)
+        env.insert("PROTON_USE_WINED3D", "1" if self.settings.get("proton_use_wined3d", False) else "0")
+        env.insert("PROTON_DXVK_D3D8", "1" if self.settings.get("proton_dxvk_d3d8", False) else "0")
+
+        return env
     def _browse_bchunk_output(self):
         path = QFileDialog.getExistingDirectory(
             self, "Seleziona la cartella di output per le ISO convertite",
@@ -1939,13 +1969,80 @@ class MainWindow(QMainWindow):
     def _log(self, text):
         self.log_output.appendPlainText(text)
 
+    # ---- Runtime Wine (Proton / sistema) ----
+    COMPAT_TOOLS_DIRS = [
+        "/usr/share/steam/compatibilitytools.d",
+        os.path.expanduser("~/.steam/root/compatibilitytools.d"),
+    ]
+
+    @staticmethod
+    def _detect_proton_runtimes():
+        """Scansiona le directory compatibilitytools.d e ritorna un dict
+        {chiave: (nome, percorso)} per ogni Proton trovato."""
+        runtimes = {}
+        for base in MainWindow.COMPAT_TOOLS_DIRS:
+            if not os.path.isdir(base):
+                continue
+            for name in sorted(os.listdir(base)):
+                if not name.startswith("proton"):
+                    continue
+                full = os.path.join(base, name)
+                if os.path.isdir(os.path.join(full, "files", "bin")):
+                    runtimes[name] = (name.replace("proton", "Proton").replace("-", " ").title(), full)
+        return runtimes
+
+    def _runtime_path(self, key):
+        """Ritorna il percorso assoluto del runtime, o '' per Wine sistema."""
+        if not key:
+            return ""
+        rt = self._detect_proton_runtimes()
+        info = rt.get(key, (None, None))
+        return info[1] if info[1] else ""
+
+    def _populate_runtime_combo(self):
+        self.runtime_combo.blockSignals(True)
+        self.runtime_combo.clear()
+        self.runtime_combo.addItem("Proton CachyOS (predefinito)", "proton-cachyos-native")
+        self.runtime_combo.addItem("Wine di sistema", "")
+        runtimes = self._detect_proton_runtimes()
+        for key, (label, _path) in runtimes.items():
+            if key not in ("proton-cachyos-native",):  # già aggiunto come default
+                self.runtime_combo.addItem(label, key)
+        # Seleziona il valore salvato
+        current = self.settings.get("wine_runtime", "proton-cachyos-native")
+        idx = self.runtime_combo.findData(current)
+        if idx >= 0:
+            self.runtime_combo.setCurrentIndex(idx)
+        self._update_proton_options_visibility()
+        self.runtime_combo.blockSignals(False)
+
+    def _update_proton_options_visibility(self):
+        is_proton = bool(self.runtime_combo.currentData())
+        self.proton_wined3d_cb.setVisible(is_proton)
+        self.proton_dxvk_d3d8_cb.setVisible(is_proton)
+
+    def _on_runtime_changed(self):
+        self.settings["wine_runtime"] = self.runtime_combo.currentData()
+        self._save_settings_from_ui()
+        self._update_proton_options_visibility()
+
+    def _on_proton_option_changed(self):
+        self.settings["proton_use_wined3d"] = self.proton_wined3d_cb.isChecked()
+        self.settings["proton_dxvk_d3d8"] = self.proton_dxvk_d3d8_cb.isChecked()
+        self._save_settings_from_ui()
+
     def _wine_sandbox_path(self):
         return self.settings.get("wine_sandbox_path") or "wine-sandbox"
 
     def _wine_sandbox_launch_cmd(self, sandbox_args):
         """Ritorna (program, args) per lanciare wine-sandbox.
-        Se lo script non ha il bit di esecuzione, lo wrapping con bash."""
+        Se lo script non ha il bit di esecuzione, lo wrapping con bash.
+        Se il runtime Wine è impostato, prepende --runtime <path>."""
         wine_sandbox = self._wine_sandbox_path()
+        runtime_key = self.settings.get("wine_runtime", "")
+        runtime_path = self._runtime_path(runtime_key)
+        if runtime_path:
+            sandbox_args = ["--runtime", runtime_path] + sandbox_args
         if os.path.isfile(wine_sandbox) and not os.access(wine_sandbox, os.X_OK):
             return "bash", [wine_sandbox] + sandbox_args
         return wine_sandbox, sandbox_args

@@ -22,6 +22,12 @@
 #      accesso in scrittura fuori dal prefix. Massima restrizione.
 #      wine-sandbox --install <prefix> <setup.exe> [argomenti...]
 #
+#   Opzione --runtime: specifica un runtime Wine/Proton personalizzato.
+#      wine-sandbox --runtime <DIR> [--init|--setup|--install] <prefix> <exe/verbi...>
+#      <DIR> è la root di un compatibility tool Proton (es.
+#      /usr/share/steam/compatibilitytools.d/proton-cachyos-native).
+#      Se omesso, usa wine/wineserver di sistema.
+#
 # TOGGLE DI SICUREZZA (variabili d'ambiente, tutte opzionali):
 #   SANDBOX_HIDE_HOME=0        Non nascondere la home (di default nascosta)
 #   SANDBOX_CAP_DROP=0         Non droppare le capability Linux (di default droppate)
@@ -119,6 +125,19 @@ MAX_DEPTH=5  # non usato qui, resta per compatibilità script scan
 INIT_MODE=0
 SETUP_MODE=0
 INSTALL_MODE=0
+RUNTIME=""
+
+# Opzione --runtime: percorso a un runtime Proton (es. Proton CachyOS).
+# Se specificato, WINE/WINESERVER vengono sovrascritti e LD_LIBRARY_PATH
+# include i .so del runtime.
+if [ "${1:-}" = "--runtime" ]; then
+    if [ $# -lt 2 ]; then
+        echo "Uso: $0 --runtime <DIR> [--init|--setup|--install] <prefix> <exe/verbi...>" >&2
+        exit 1
+    fi
+    RUNTIME="$2"
+    shift 2
+fi
 
 if [ "${1:-}" = "--init" ]; then
     INIT_MODE=1
@@ -196,6 +215,26 @@ ALLOW_NETWORK="${SANDBOX_ALLOW_NETWORK:-0}"
 DISABLE_ZDRIVE="${SANDBOX_DISABLE_ZDRIVE:-1}"
 EXE_RW="${SANDBOX_EXE_RW:-0}"
 GAMEPAD="${SANDBOX_GAMEPAD:-1}"
+
+# Runtime Wine personalizzato (Proton/Proton-CachyOS): override wine/wineserver
+# e prepende le librerie del runtime a LD_LIBRARY_PATH (necessarie per trovare
+# ntdll.so e gli altri .so di Wine/Proton).
+if [ -n "$RUNTIME" ]; then
+    if [ ! -d "$RUNTIME/files/bin" ]; then
+        echo "Errore: runtime '$RUNTIME' non trovato o struttura non valida (manca files/bin/)." >&2
+        exit 1
+    fi
+    export WINE="$RUNTIME/files/bin/wine"
+    export WINESERVER="$RUNTIME/files/bin/wineserver"
+    export LD_LIBRARY_PATH="$RUNTIME/files/lib:$RUNTIME/files/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    # Opzioni runtime Proton (ereditate dall'ambiente o default)
+    export PROTON_USE_WINED3D="${PROTON_USE_WINED3D:-0}"
+    export PROTON_DXVK_D3D8="${PROTON_DXVK_D3D8:-0}"
+    export PROTON_NO_FSYNC="${PROTON_NO_FSYNC:-0}"
+    export PROTON_NO_NTSYNC="${PROTON_NO_NTSYNC:-0}"
+    export PROTON_FORCE_LARGE_ADDRESS_AWARE="${PROTON_FORCE_LARGE_ADDRESS_AWARE:-1}"
+    echo "   Runtime: $RUNTIME"
+fi
 
 if [ "$DISABLE_ZDRIVE" -eq 1 ] && [ -e "$WINEPFX/dosdevices/z:" ]; then
     rm -f "$WINEPFX/dosdevices/z:"

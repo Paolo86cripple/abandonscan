@@ -148,6 +148,27 @@ Se introduci un sistema di test/lint, aggiorna questa sezione.
   sandbox ovunque supera il beneficio marginale.
 - GPU: di default solo i render node (`/dev/dri/renderD*`), nessun
   `CAP_SYS_ADMIN`. card0 intero + CAP_SYS_ADMIN è opt-in per driver legacy.
+- **Gamepad**: il sandbox usa `--dev /dev` che crea un `/dev` minimale senza device
+  di input hardware. Per esporre `/dev/input` (evdev) e `/run/udev/data` (libudev)
+  serve `SANDBOX_GAMEPAD=1` (default ON, attivato dal toggle nella GUI).
+
+## Runtime Wine (Proton CachyOS, sistema)
+
+La GUI seleziona il runtime Wine tramite un dropdown nel tab Giochi (default:
+Proton CachyOS-native). Lo script riceve `--runtime <DIR>` prima dei flag di modalità.
+Quando attivo:
+- `WINE` e `WINESERVER` vengono sovrascritti con quelli del runtime
+- `LD_LIBRARY_PATH` prepende `$RUNTIME/files/lib` e `$RUNTIME/files/lib64`
+  (necessario per trovare `ntdll.so` e gli altri `.so` di Wine/Proton)
+- Le variabili `PROTON_USE_WINED3D`, `PROTON_DXVK_D3D8`, etc. vengono propagate
+
+**Winetricks con Proton**: il pulsante "Installa dipendenze" del tab Sistema
+usa `wine-sandbox --setup` che con `--runtime` attivo chiama `winetricks` con
+`WINE`/`WINESERVER` del runtime Proton (non servono AppID Steam né `protontricks`).
+
+**Rilevamento automatico**: la GUI scansiona `/usr/share/steam/compatibilitytools.d/`
+e `~/.steam/root/compatibilitytools.d/` per le installazioni Proton. Se non trova
+Proton, il dropdown mostra solo "Wine di sistema".
 
 ## scan-game (progetto separato)
 
