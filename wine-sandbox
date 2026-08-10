@@ -302,9 +302,9 @@ BWRAP_ARGS+=(
     --ro-bind /dev/null /proc/kcore
     --ro-bind /dev/null /proc/kallsyms
     --ro-bind /dev/null /proc/sysrq-trigger
-    --ro-bind /dev/null /proc/modules
-    --ro-bind /dev/null /proc/config.gz
-    --ro-bind /dev/null /proc/sched_debug
+    --ro-bind-try /dev/null /proc/modules
+    --ro-bind-try /dev/null /proc/config.gz
+    --ro-bind-try /dev/null /proc/sched_debug
     --tmpfs /proc/bus
     --tmpfs /proc/scsi
 )
