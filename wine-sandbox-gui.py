@@ -1011,6 +1011,8 @@ class MainWindow(QMainWindow):
         self.proton_dxvk_d3d8_cb.stateChanged.connect(self._on_proton_option_changed)
         runtime_layout.addWidget(self.proton_dxvk_d3d8_cb)
 
+        self._update_proton_options_visibility()
+
         left_layout.addWidget(runtime_box)
 
         left_layout.addWidget(QLabel(""))
@@ -2013,7 +2015,6 @@ class MainWindow(QMainWindow):
         idx = self.runtime_combo.findData(current)
         if idx >= 0:
             self.runtime_combo.setCurrentIndex(idx)
-        self._update_proton_options_visibility()
         self.runtime_combo.blockSignals(False)
 
     def _update_proton_options_visibility(self):
