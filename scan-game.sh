@@ -102,9 +102,6 @@ extract_recursive() {
             fi
             return
             ;;
-        *.mdf|*.mds)
-            return
-            ;;
         *.mdf)
             command -v mdf2iso &>/dev/null || {
                 echo "  mdf2iso non installato, conversione MDF non disponibile: $src"
@@ -235,10 +232,11 @@ check_vt() {
         first_file="$(echo "$files_list" | head -1)"
         if [ -n "$first_file" ] && [ -f "$first_file" ]; then
             echo "    Upload in corso: $(basename "$first_file")"
-            curl -sS --request POST \
+            curl -# -S --request POST \
                 --url "https://www.virustotal.com/api/v3/files" \
                 --header "x-apikey: ${VT_API_KEY}" \
-                --form "file=@${first_file}" > /dev/null 2>&1
+                --form "file=@${first_file}" > /dev/null
+            echo ""
         fi
         return 0
     fi

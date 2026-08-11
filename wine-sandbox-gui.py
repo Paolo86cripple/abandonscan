@@ -640,7 +640,8 @@ class ScanThread(QThread):
             f"puliti={result['virustotal']['harmless']}")
 
     def _vt_upload(self, result):
-        self.log.emit("Upload del file a VirusTotal (può richiedere qualche minuto)...")
+        size_mb = os.path.getsize(self.filepath) / (1024 * 1024)
+        self.log.emit(f"Upload del file a VirusTotal ({size_mb:.0f} MB, può richiedere qualche minuto)...")
         try:
             boundary = "----wineSandboxGUI" + hashlib.sha1(os.urandom(16)).hexdigest()
             body = _build_multipart_body("file", self.filepath, boundary)
