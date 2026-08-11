@@ -13,9 +13,7 @@
 #   - Archivi:        .zip .rar .7z
 #   - Immagini ottiche: .iso .img .nrg (via 7z, che legge ISO9660/UDF)
 #   - .bin/.cue        (convertiti in ISO con bchunk, poi estratti)
-#   - .mdf/.mds        rilevati ma non estratti automaticamente (formato
-#                      proprietario Alcohol 120%, tool poco standard su
-#                      Linux) - vengono comunque scansionati come file
+#   - .mdf/.mds        convertiti con mdf2iso, poi estratti come ISO
 #
 # Uso: ./scan-game.sh <url|link_mega|percorso_file_locale> [password_mega]
 
@@ -103,11 +101,11 @@ extract_recursive() {
             return
             ;;
         *.mdf)
-            command -v mdf2iso &>/dev/null || {
-                echo "  mdf2iso non installato, conversione MDF non disponibile: $src"
-                echo "  Installa con: sudo pacman -S mdf2iso"
-                return
-            }
+            if ! command -v mdf2iso &>/dev/null; then
+                echo "ERRORE: mdf2iso non installato. È un requisito per l'estrazione MDF." >&2
+                echo "  Installa con: sudo pacman -S mdf2iso" >&2
+                exit 1
+            fi
             local iso_out="${src}.iso"
             mkdir -p "$outdir"
             if mdf2iso "$src" "$iso_out" 2>/dev/null; then

@@ -320,6 +320,7 @@ REQUIRED_TOOLS = [
     ("bchunk", "Conversione BIN/CUE in ISO"),
     ("7z", "Estrazione ISO/IMG/NRG/7z"),
     ("unzip", "Estrazione archivi ZIP"),
+    ("mdf2iso", "Conversione MDF → ISO (Alcohol 120%)"),
 ]
 
 
@@ -1036,7 +1037,7 @@ class MainWindow(QMainWindow):
         info = QLabel(
             "Monta ISO/IMG/NRG direttamente (via udisksctl, nessun sudo richiesto).\n"
             "I file BIN vengono prima convertiti in ISO con bchunk (serve il .cue corrispondente).\n"
-            "I file MDF/MDS non sono supportati automaticamente (formato Alcohol 120% proprietario)."
+            "I file MDF/MDS vengono convertiti in ISO via mdf2iso e poi montati."
         )
         info.setWordWrap(True)
         layout.addWidget(info)
@@ -1050,8 +1051,8 @@ class MainWindow(QMainWindow):
         self.btn_mount_bincue.clicked.connect(self._on_mount_bincue_clicked)
         btn_row.addWidget(self.btn_mount_bincue)
 
-        self.btn_mount_mdf = QPushButton("ℹ️ Info su MDF/MDS")
-        self.btn_mount_mdf.clicked.connect(self._on_mdf_info_clicked)
+        self.btn_mount_mdf = QPushButton("💿 Converti e monta MDF/MDS...")
+        self.btn_mount_mdf.clicked.connect(self._on_mdf_convert_clicked)
         btn_row.addWidget(self.btn_mount_mdf)
         layout.addLayout(btn_row)
 
@@ -2985,17 +2986,75 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Errore", f"Errore durante la conversione: {e}")
 
-    def _on_mdf_info_clicked(self):
-        QMessageBox.information(
-            self, "Formato MDF/MDS non supportato automaticamente",
-            "I file .mdf/.mds sono nel formato proprietario di Alcohol 120% e non hanno "
-            "un supporto diretto e affidabile su Linux.\n\n"
-            "Opzioni possibili:\n"
-            "- Cerca un tool di conversione mdf2iso (non incluso in questa GUI)\n"
-            "- Verifica se il file ha in realtà una struttura ISO9660 semplice: prova a "
-            "rinominarlo in .iso e monta con il pulsante 'Monta ISO/IMG/NRG'\n"
-            "- Se disponibile, riscarica il gioco in formato ISO o BIN/CUE invece che MDF"
-        )
+    def _on_mdf_convert_clicked(self):
+        """Converte un file .mdf in .iso via mdf2iso e lo monta con udisksctl."""
+        mdf_path, _ = QFileDialog.getOpenFileName(
+            self, "Seleziona il file MDF da convertire",
+            self.settings["games_root"], "File MDF (*.mdf)")
+        if not mdf_path:
+            return
+
+        if not shutil.which("mdf2iso"):
+            QMessageBox.critical(self, "mdf2iso non trovato",
+                "mdf2iso non è installato. È necessario per convertire file MDF.\n\n"
+                "Installa con: sudo pacman -S mdf2iso")
+            return
+
+        iso_path = os.path.join(tempfile.gettempdir(),
+            os.path.splitext(os.path.basename(mdf_path))[0] + ".iso")
+
+        self._log(f"Conversione MDF → ISO: {os.path.basename(mdf_path)}")
+        QMessageBox.information(self, "Conversione in corso",
+            f"Conversione di {os.path.basename(mdf_path)} in ISO...\n"
+            "L'operazione può richiedere qualche minuto per file grandi.")
+
+        try:
+            proc = subprocess.run(
+                ["mdf2iso", mdf_path, iso_path],
+                capture_output=True, text=True, timeout=300)
+            if proc.returncode != 0:
+                QMessageBox.critical(self, "Errore conversione",
+                    f"mdf2iso ha fallito (codice {proc.returncode}):\n{proc.stderr}")
+                return
+        except subprocess.TimeoutExpired:
+            QMessageBox.critical(self, "Timeout", "Conversione MDF troppo lenta (timeout 5 minuti).")
+            return
+        except Exception as e:
+            QMessageBox.critical(self, "Errore", f"Errore durante la conversione: {e}")
+            return
+
+        self._log(f"ISO creato: {iso_path}")
+
+        # Monta l'ISO risultante con udisksctl
+        try:
+            result = subprocess.run(
+                ["udisksctl", "loop-setup", "-f", iso_path, "--no-user-interaction"],
+                capture_output=True, text=True, timeout=15)
+            loop_device = None
+            for line in result.stdout.splitlines():
+                if "Mapped file" in line:
+                    loop_device = line.strip().split()[-1].rstrip(".")
+                    break
+            if not loop_device:
+                QMessageBox.critical(self, "Errore mount",
+                    f"Impossibile determinare il loop device:\n{result.stdout}")
+                return
+
+            subprocess.run(
+                ["udisksctl", "mount", "-b", loop_device, "--no-user-interaction"],
+                capture_output=True, text=True, timeout=15)
+
+            mount_point = f"/run/media/{os.environ.get('USER', '')}/{os.path.splitext(os.path.basename(iso_path))[0]}"
+            self._log(f"Montato: {loop_device} → {mount_point}")
+            self.mounted_images.append({
+                "path": iso_path, "device": loop_device, "mdf_original": mdf_path})
+            self._refresh_mounted_list()
+            QMessageBox.information(self, "MDF montato",
+                f"File MDF convertito e montato con successo.\n\n"
+                f"Percorso: {mount_point}\n\n"
+                f"L'ISO temporaneo verrà rimosso allo smontaggio.")
+        except Exception as e:
+            QMessageBox.critical(self, "Errore mount", f"Errore durante il mount: {e}")
 
     def _mount_via_udisks(self, path):
         if not shutil.which("udisksctl"):
@@ -3075,6 +3134,14 @@ class MainWindow(QMainWindow):
                 self._log(delete_result.stdout.strip())
                 if delete_result.returncode != 0:
                     self._log(delete_result.stderr.strip())
+
+            # Pulizia ISO temporaneo da conversione MDF
+            if entry.get("mdf_original"):
+                try:
+                    os.remove(entry["path"])
+                    self._log(f"  Rimosso ISO temporaneo: {entry['path']}")
+                except OSError:
+                    pass
 
             self.mounted_images = [e for e in self.mounted_images if e["device"] != device]
             self._refresh_mounted_list()
@@ -3637,6 +3704,11 @@ class MainWindow(QMainWindow):
                 if "/loop" in device:
                     subprocess.run(["udisksctl", "loop-delete", "-b", device],
                                    capture_output=True, text=True, timeout=10)
+                if entry.get("mdf_original"):
+                    try:
+                        os.remove(entry["path"])
+                    except OSError:
+                        pass
                 self._log(f"  Smontato: {entry.get('path', device)}")
             except Exception as e:
                 self._log(f"  ERRORE smontaggio {device}: {e}")
