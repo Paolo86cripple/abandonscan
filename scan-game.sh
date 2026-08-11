@@ -176,66 +176,108 @@ else
 fi
 
 echo ""
-echo "== 3/5: Calcolo hash SHA256 (file originale) =="
-SHA256="$(sha256sum "$WORKDIR/$FILENAME" | cut -d' ' -f1)"
-echo "SHA256: $SHA256"
+echo "== 3/5: Calcolo hash SHA256 di tutti i file =="
+# Raccogli tutti i file (originale + estratti) con hash deduplicato
+ALL_FILES="$(find "$WORKDIR" -type f | sort)"
+TOTAL_FILES=$(echo "$ALL_FILES" | wc -l)
+echo "File totali da analizzare: $TOTAL_FILES"
+# Mappa hash -> percorsi (hash duplicati = file identici, una sola richiesta VT)
+declare -A HASH_MAP
+declare -A HASH_FILES  # hash -> elenco file (separati da newline)
+while IFS= read -r f; do
+    h=$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)
+    [ -z "$h" ] && continue
+    HASH_MAP["$h"]=1
+    HASH_FILES["$h"]="${HASH_FILES[$h]}${f}
+"
+done <<< "$ALL_FILES"
+UNIQUE_HASHES="${#HASH_MAP[@]}"
+echo "Hash unici da verificare: $UNIQUE_HASHES"
 
 echo ""
-echo "== 4/5: Verifica su VirusTotal (70+ motori) =="
+echo "== 4/5: Verifica su VirusTotal (70+ motori, ricorsivo) =="
+VT_ANY_FLAGGED=0
+VT_CHECKED=0
+VT_SKIPPED=0
+VT_CLEAN=0
+VT_FLAGGED=0
+
+check_vt() {
+    local sha256="$1"
+    local files_list="$2"
+    VT_CHECKED=$((VT_CHECKED + 1))
+    local resp
+    resp="$(curl -sS --request GET \
+        --url "https://www.virustotal.com/api/v3/files/${sha256}" \
+        --header "x-apikey: ${VT_API_KEY}" 2>/dev/null)"
+
+    if echo "$resp" | grep -q '"error"'; then
+        echo "  [${VT_CHECKED}/${UNIQUE_HASHES}] ${sha256:0:12}… → non trovato su VT"
+        VT_SKIPPED=$((VT_SKIPPED + 1))
+        # Se non trovato, carica il primo file con questo hash
+        local first_file
+        first_file="$(echo "$files_list" | head -1)"
+        if [ -n "$first_file" ] && [ -f "$first_file" ]; then
+            echo "    Upload in corso: $(basename "$first_file")"
+            curl -sS --request POST \
+                --url "https://www.virustotal.com/api/v3/files" \
+                --header "x-apikey: ${VT_API_KEY}" \
+                --form "file=@${first_file}" > /dev/null 2>&1
+        fi
+        return 0
+    fi
+
+    local malicious suspicious harmless filename
+    malicious="$(echo "$resp" | grep -o '"malicious":[0-9]*' | head -1 | cut -d':' -f2)"
+    suspicious="$(echo "$resp" | grep -o '"suspicious":[0-9]*' | head -1 | cut -d':' -f2)"
+    harmless="$(echo "$resp" | grep -o '"harmless":[0-9]*' | head -1 | cut -d':' -f2)"
+    filename="$(echo "$files_list" | head -1 | xargs basename)"
+
+    if [ "${malicious:-0}" -gt 0 ] || [ "${suspicious:-0}" -gt 0 ]; then
+        echo "  [${VT_CHECKED}/${UNIQUE_HASHES}] ${sha256:0:12}… ⚠️ ${malicious:-0} malevoli, ${suspicious:-0} sospetti"
+        echo "    File: $(echo "$files_list" | tr '\n' ' ')"
+        VT_FLAGGED=$((VT_FLAGGED + 1))
+        VT_ANY_FLAGGED=1
+    else
+        echo "  [${VT_CHECKED}/${UNIQUE_HASHES}] ${sha256:0:12}… ✅ pulito (${harmless:-0} motori)"
+        VT_CLEAN=$((VT_CLEAN + 1))
+    fi
+}
+
 if [ -z "${VT_API_KEY:-}" ]; then
     echo "ATTENZIONE: VT_API_KEY non impostata, salto il controllo VirusTotal."
 else
-    VT_RESPONSE="$(curl -sS --request GET \
-        --url "https://www.virustotal.com/api/v3/files/${SHA256}" \
-        --header "x-apikey: ${VT_API_KEY}")"
+    for hash in "${!HASH_MAP[@]}"; do
+        check_vt "$hash" "${HASH_FILES[$hash]}"
+        # Rispetta il rate limit gratuito (4 richieste/minuto)
+        if [ $VT_CHECKED -lt "$UNIQUE_HASHES" ]; then
+            sleep 3
+        fi
+    done
+    echo ""
+    echo "VT Riepilogo: $VT_CHECKED verificati, $VT_CLEAN puliti, $VT_FLAGGED sospetti, $VT_SKIPPED non trovati"
 
-    if echo "$VT_RESPONSE" | grep -q '"error"'; then
-        echo "Hash non trovato su VirusTotal, carico il file (può richiedere qualche minuto)..."
-        UPLOAD_RESPONSE="$(curl -sS --request POST \
-            --url "https://www.virustotal.com/api/v3/files" \
-            --header "x-apikey: ${VT_API_KEY}" \
-            --form "file=@${WORKDIR}/${FILENAME}")"
-        ANALYSIS_ID="$(echo "$UPLOAD_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)"
-        echo "Analisi in corso (id: $ANALYSIS_ID). Ricontrolla tra 1-2 minuti con:"
-        echo "curl -sS --url https://www.virustotal.com/api/v3/analyses/${ANALYSIS_ID} --header \"x-apikey: \$VT_API_KEY\""
-    else
-        MALICIOUS="$(echo "$VT_RESPONSE" | grep -o '"malicious":[0-9]*' | head -1 | cut -d':' -f2)"
-        SUSPICIOUS="$(echo "$VT_RESPONSE" | grep -o '"suspicious":[0-9]*' | head -1 | cut -d':' -f2)"
-        HARMLESS="$(echo "$VT_RESPONSE" | grep -o '"harmless":[0-9]*' | head -1 | cut -d':' -f2)"
-        echo "Risultato VirusTotal (file già analizzato in precedenza):"
-        echo "  Motori che segnalano MALEVOLO:  ${MALICIOUS:-0}"
-        echo "  Motori che segnalano SOSPETTO:  ${SUSPICIOUS:-0}"
-        echo "  Motori che segnalano PULITO:    ${HARMLESS:-0}"
-
-        if [ "${MALICIOUS:-0}" -gt 0 ] || [ "${SUSPICIOUS:-0}" -gt 0 ]; then
-            echo ""
-            echo "== 5/5: VirusTotal ha segnalato positivi, avvio analisi comportamentale Falcon Sandbox =="
-            if [ -z "${FALCON_API_KEY:-}" ]; then
-                echo "ATTENZIONE: FALCON_API_KEY non impostata, salto l'analisi Falcon Sandbox."
-                echo "Imposta il secret nel Codespace per abilitarla in questi casi."
+    if [ "$VT_ANY_FLAGGED" -eq 1 ]; then
+        echo ""
+        echo "== 5/5: VirusTotal ha segnalato positivi, avvio analisi comportamentale Falcon Sandbox =="
+        if [ -z "${FALCON_API_KEY:-}" ]; then
+            echo "ATTENZIONE: FALCON_API_KEY non impostata, salto l'analisi Falcon Sandbox."
+        else
+            FALCON_ENV_ID="${FALCON_ENV_ID:-100}"
+            FALCON_RESPONSE="$(curl -sS --request POST \
+                --url "https://www.hybrid-analysis.com/api/v2/submit/file" \
+                --header "api-key: ${FALCON_API_KEY}" \
+                --header "user-agent: Falcon Sandbox" \
+                --form "file=@${WORKDIR}/${FILENAME}" \
+                --form "environment_id=${FALCON_ENV_ID}")"
+            FALCON_JOB_ID="$(echo "$FALCON_RESPONSE" | grep -o '"job_id":"[^"]*"' | head -1 | cut -d'"' -f4)"
+            FALCON_SHA256="$(echo "$FALCON_RESPONSE" | grep -o '"sha256":"[^"]*"' | head -1 | cut -d'"' -f4)"
+            if [ -n "$FALCON_JOB_ID" ]; then
+                echo "Analisi comportamentale avviata su: $(basename "$WORKDIR/$FILENAME")"
+                echo "Job ID: $FALCON_JOB_ID"
+                echo "Risultati: https://www.hybrid-analysis.com/sample/${FALCON_SHA256}/${FALCON_JOB_ID}"
             else
-                FALCON_ENV_ID="${FALCON_ENV_ID:-100}"  # 100 = Windows 7 32-bit, adatto a Win9x/XP-era
-                FALCON_RESPONSE="$(curl -sS --request POST \
-                    --url "https://www.hybrid-analysis.com/api/v2/submit/file" \
-                    --header "api-key: ${FALCON_API_KEY}" \
-                    --header "user-agent: Falcon Sandbox" \
-                    --form "file=@${WORKDIR}/${FILENAME}" \
-                    --form "environment_id=${FALCON_ENV_ID}")"
-
-                FALCON_JOB_ID="$(echo "$FALCON_RESPONSE" | grep -o '"job_id":"[^"]*"' | head -1 | cut -d'"' -f4)"
-                FALCON_SHA256="$(echo "$FALCON_RESPONSE" | grep -o '"sha256":"[^"]*"' | head -1 | cut -d'"' -f4)"
-
-                if [ -n "$FALCON_JOB_ID" ]; then
-                    echo "Analisi comportamentale avviata (può richiedere fino a ~15 minuti)."
-                    echo "Job ID: $FALCON_JOB_ID"
-                    echo "Risultati (quando pronti) su:"
-                    echo "  https://www.hybrid-analysis.com/sample/${FALCON_SHA256}/${FALCON_JOB_ID}"
-                    echo "Oppure controlla da terminale con:"
-                    echo "  curl -sS --url https://www.hybrid-analysis.com/api/v2/report/${FALCON_JOB_ID}/summary --header \"api-key: \$FALCON_API_KEY\" --header \"user-agent: Falcon Sandbox\""
-                else
-                    echo "ATTENZIONE: invio a Falcon Sandbox non riuscito. Risposta ricevuta:"
-                    echo "$FALCON_RESPONSE"
-                fi
+                echo "ATTENZIONE: invio a Falcon Sandbox non riuscito."
             fi
         fi
     fi
@@ -245,7 +287,14 @@ echo ""
 echo "== RIEPILOGO =="
 echo "Archivio/file originale: $WORKDIR/$FILENAME"
 if [ "$FOUND_EXTRACTED" -gt 0 ]; then
-    echo "File estratti: $FOUND_EXTRACTED (vedi elenco sopra)"
+    echo "File estratti: $FOUND_EXTRACTED"
+fi
+if [ -n "${VT_API_KEY:-}" ]; then
+    if [ "$VT_ANY_FLAGGED" -eq 1 ]; then
+        echo "⚠️  VirusTotal: $VT_FLAGGED file sospetti su $VT_CHECKED verificati"
+    else
+        echo "✅ VirusTotal: tutti $VT_CHECKED file puliti"
+    fi
 fi
 echo ""
 echo "Se tutto pulito, scarica l'intera cartella $WORKDIR dal Codespace con l'esploratore VS Code (tasto destro > Download)."
