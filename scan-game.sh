@@ -103,7 +103,23 @@ extract_recursive() {
             return
             ;;
         *.mdf|*.mds)
-            echo "  Rilevato formato MDF/MDS ($src): estrazione automatica non supportata, verrà comunque scansionato come file singolo."
+            return
+            ;;
+        *.mdf)
+            command -v mdf2iso &>/dev/null || {
+                echo "  mdf2iso non installato, conversione MDF non disponibile: $src"
+                echo "  Installa con: sudo pacman -S mdf2iso"
+                return
+            }
+            local iso_out="${src}.iso"
+            mkdir -p "$outdir"
+            if mdf2iso "$src" "$iso_out" 2>/dev/null; then
+                echo "  Convertito MDF -> ISO: $src"
+                extract_recursive "$iso_out" $((depth + 1))
+            else
+                echo "  ATTENZIONE: conversione MDF fallita per $src (potrebbe essere corrotto o non standard)"
+                rmdir "$outdir" 2>/dev/null || true
+            fi
             return
             ;;
         *)
@@ -188,7 +204,7 @@ while IFS= read -r f; do
     h=$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)
     [ -z "$h" ] && continue
     HASH_MAP["$h"]=1
-    HASH_FILES["$h"]="${HASH_FILES[$h]}${f}
+    HASH_FILES["$h"]="${HASH_FILES[$h]:-}${f}
 "
 done <<< "$ALL_FILES"
 UNIQUE_HASHES="${#HASH_MAP[@]}"

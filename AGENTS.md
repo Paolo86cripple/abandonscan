@@ -1,5 +1,8 @@
 # AbandonScan — guida per agenti AI
 
+**Regola ferrea: non usare mai `sudo`.** Qualsiasi installazione di pacchetti
+va segnalata all'utente, che la esegue manualmente.
+
 ## Cos'è
 
 Toolchain Linux per giocare giochi retro/abandonware in modo sicuro ed efficiente:

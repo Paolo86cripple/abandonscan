@@ -1,7 +1,7 @@
 {
   "name": "file-scan-sandbox",
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
-  "postCreateCommand": "sudo apt update && sudo apt install -y unzip p7zip-full unrar-free megatools bchunk",
+  "postCreateCommand": "sudo apt update && sudo apt install -y unzip p7zip-full unrar-free megatools bchunk mdf2iso",
   "customizations": {
     "vscode": {
       "extensions": []
