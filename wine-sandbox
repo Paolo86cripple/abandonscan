@@ -537,16 +537,18 @@ else
         # socket locali per componenti interni - es. alcuni motori audio/video)
         if [ "$VIRTUAL_DESKTOP" -eq 1 ]; then
             exec bwrap "${BWRAP_ARGS[@]}" "${COMMON_ENV[@]}" \
-                sh -c 'ip link set lo up 2>/dev/null; exec wine explorer /desktop=abandonscan,'"$VIRTUAL_DESKTOP_SIZE"' "$0" "$@"' "$EXE" "$@"
+                sh -c 'ip link set lo up 2>/dev/null; cd "$0" && exec wine explorer /desktop=abandonscan,'"$VIRTUAL_DESKTOP_SIZE"' "$1" "${@:2}"' "$EXE_DIR" "$EXE" "$@"
         else
             exec bwrap "${BWRAP_ARGS[@]}" "${COMMON_ENV[@]}" \
-                sh -c 'ip link set lo up 2>/dev/null; exec wine "$0" "$@"' "$EXE" "$@"
+                sh -c 'ip link set lo up 2>/dev/null; cd "$0" && exec wine "$1" "${@:2}"' "$EXE_DIR" "$EXE" "$@"
         fi
     else
         if [ "$VIRTUAL_DESKTOP" -eq 1 ]; then
-            exec bwrap "${BWRAP_ARGS[@]}" "${COMMON_ENV[@]}" wine explorer /desktop=abandonscan,"$VIRTUAL_DESKTOP_SIZE" "$EXE" "$@"
+            exec bwrap "${BWRAP_ARGS[@]}" "${COMMON_ENV[@]}" \
+                sh -c 'cd "$0" && exec wine explorer /desktop=abandonscan,'"$VIRTUAL_DESKTOP_SIZE"' "$1" "${@:2}"' "$EXE_DIR" "$EXE" "$@"
         else
-            exec bwrap "${BWRAP_ARGS[@]}" "${COMMON_ENV[@]}" wine "$EXE" "$@"
+            exec bwrap "${BWRAP_ARGS[@]}" "${COMMON_ENV[@]}" \
+                sh -c 'cd "$0" && exec wine "$1" "${@:2}"' "$EXE_DIR" "$EXE" "$@"
         fi
     fi
 fi
