@@ -641,6 +641,9 @@ class ScanThread(QThread):
 
     def _vt_upload(self, result):
         size_mb = os.path.getsize(self.filepath) / (1024 * 1024)
+        if size_mb > 50:
+            self.log.emit(f"Upload saltato: file troppo grande ({size_mb:.0f} MB > 50 MB), solo hash verificato.")
+            return
         self.log.emit(f"Upload del file a VirusTotal ({size_mb:.0f} MB, può richiedere qualche minuto)...")
         try:
             boundary = "----wineSandboxGUI" + hashlib.sha1(os.urandom(16)).hexdigest()

@@ -215,6 +215,9 @@ VT_SKIPPED=0
 VT_CLEAN=0
 VT_FLAGGED=0
 
+# Limite upload VT: file oltre questa dimensione vengono solo hash-ati, non caricati
+VT_UPLOAD_MAX_SIZE=52428800  # 50 MB
+
 check_vt() {
     local sha256="$1"
     local files_list="$2"
@@ -231,12 +234,18 @@ check_vt() {
         local first_file
         first_file="$(echo "$files_list" | head -1)"
         if [ -n "$first_file" ] && [ -f "$first_file" ]; then
-            echo "    Upload in corso: $(basename "$first_file")"
-            curl -# -S --request POST \
-                --url "https://www.virustotal.com/api/v3/files" \
-                --header "x-apikey: ${VT_API_KEY}" \
-                --form "file=@${first_file}" > /dev/null
-            echo ""
+            local fsize
+            fsize=$(stat -c%s "$first_file" 2>/dev/null || echo 0)
+            if [ "$fsize" -gt "$VT_UPLOAD_MAX_SIZE" ]; then
+                echo "    Upload saltato: file troppo grande ($(( fsize / 1048576 )) MB > $(( VT_UPLOAD_MAX_SIZE / 1048576 )) MB), solo hash verificato"
+            else
+                echo "    Upload in corso: $(basename "$first_file")"
+                curl -# -S --request POST \
+                    --url "https://www.virustotal.com/api/v3/files" \
+                    --header "x-apikey: ${VT_API_KEY}" \
+                    --form "file=@${first_file}" > /dev/null
+                echo ""
+            fi
         fi
         return 0
     fi
@@ -265,7 +274,7 @@ else
         check_vt "$hash" "${HASH_FILES[$hash]}"
         # Rispetta il rate limit gratuito (4 richieste/minuto)
         if [ $VT_CHECKED -lt "$UNIQUE_HASHES" ]; then
-            sleep 3
+            sleep 1
         fi
     done
     echo ""
