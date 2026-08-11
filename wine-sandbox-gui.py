@@ -1384,8 +1384,19 @@ class MainWindow(QMainWindow):
         self.btn_scan_file = QPushButton("🛡 Scansiona file...")
         self.btn_scan_file.clicked.connect(self._on_scan_file_clicked)
         scan_btn_layout.addWidget(self.btn_scan_file)
-        container_layout.addWidget(scan_btn_box)
 
+        recursive_info = QLabel(
+            "Per archivi (.zip/.rar/.7z) e immagini ottiche, la scansione ricorsiva "
+            "estrae tutto il contenuto e verifica ogni file su VirusTotal. "
+            "Richiede VT_API_KEY impostata come variabile d'ambiente."
+        )
+        recursive_info.setWordWrap(True)
+        scan_btn_layout.addWidget(recursive_info)
+        self.btn_scan_recursive = QPushButton("📦 Scansione ricorsiva (scan-game.sh)...")
+        self.btn_scan_recursive.clicked.connect(self._on_scan_recursive_clicked)
+        scan_btn_layout.addWidget(self.btn_scan_recursive)
+
+        container_layout.addWidget(scan_btn_box)
         layout.addWidget(QLabel("Storico scansioni (questa sessione):"))
         self.scan_history_list = QListWidget()
         layout.addWidget(self.scan_history_list)
@@ -2527,6 +2538,57 @@ class MainWindow(QMainWindow):
         if not filepath:
             return
         self._start_scan(filepath)
+
+    def _on_scan_recursive_clicked(self):
+        """Avvia scan-game.sh in modo ricorsivo su un archivio/file, mostrando
+        l'output in tempo reale. Richiede VT_API_KEY come variabile d'ambiente."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Seleziona l'archivio o il file da scansionare ricorsivamente",
+            self.settings["games_root"],
+            "Archivi e file (*.zip *.rar *.7z *.iso *.img *.nrg *.bin *.exe *.*)")
+        if not filepath:
+            return
+
+        scan_script = os.path.join(os.path.dirname(__file__), "scan-game.sh")
+        if not os.path.isfile(scan_script):
+            QMessageBox.warning(self, "scan-game.sh non trovato",
+                f"Lo script {scan_script} non esiste.\n"
+                "Assicurati che sia nella stessa directory di wine-sandbox-gui.py.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Scansione ricorsiva (scan-game.sh)")
+        dialog.resize(700, 500)
+        layout = QVBoxLayout(dialog)
+        log = QPlainTextEdit()
+        log.setReadOnly(True)
+        log.setStyleSheet("font-family: monospace; font-size: 10pt;")
+        layout.addWidget(log)
+
+        proc = QProcess(dialog)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("VT_API_KEY", self.settings.get("virustotal_api_key", ""))
+        env.insert("FALCON_API_KEY", self.settings.get("falcon_api_key", ""))
+        proc.setProcessEnvironment(env)
+
+        def append(text):
+            log.moveCursor(QTextCursor.MoveOperation.End)
+            log.insertPlainText(text)
+            # scroll to bottom
+            sb = log.verticalScrollBar()
+            sb.setValue(sb.maximum())
+
+        proc.readyReadStandardOutput.connect(
+            lambda: append(proc.readAllStandardOutput().data().decode(errors="replace")))
+        proc.finished.connect(lambda code, status: append(
+            f"\n[scan-game.sh terminato con codice {code}]\n"))
+        proc.errorOccurred.connect(
+            lambda err: append(f"\n[ERRORE: {proc.errorString()}]\n"))
+
+        proc.start("bash", [scan_script, filepath])
+        append(f"$ bash {scan_script} {filepath}\n")
+        dialog.show()
 
     def _start_scan(self, filepath, on_finished=None):
         """Avvia la scansione in background mostrando un dialog non modale di
